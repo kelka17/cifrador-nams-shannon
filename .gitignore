@@ -1,0 +1,18 @@
+# Archivos compilados
+*.o
+*.out
+*.bin
+
+# Ejecutables
+cifrador
+main
+
+# Archivos temporales
+*.tmp
+*.log
+
+# VSCode
+.vscode/
+
+# Linux
+*.swp
