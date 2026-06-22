@@ -1,13 +1,15 @@
-; main.asm
-; Punto de entrada y orquestación del cifrador con ENTROPÍA.
+; main.asm v4
+; Encrypt y Decrypt SEPARADOS - manejo correcto de cabecera.
 
 %include "include/syscalls.inc"
 %include "include/macros.inc"
+%include "include/header.inc"
 
 global _start
 extern sys_open, sys_read, sys_write, sys_close, sys_mmap, sys_munmap, sys_exit
 extern cipher_xor
 extern frequency_clear, frequency_count, entropy_calculate
+extern header_build, header_checksum, header_validate
 
 section .rodata
     banner db "================================", 10
@@ -37,8 +39,11 @@ section .bss
     input_size resq 1           ; tamaño en bytes
     output_fd resq 1            ; file descriptor de salida
     mode_is_encrypt resq 1      ; 1 = encrypt, 0 = decrypt
-    entropy_before resq 1       ; H1 (doble en FPU)
-    entropy_after resq 1        ; H2 (doble en FPU)
+    entropy_before resq 1       ; H1 (doble)
+    entropy_after resq 1        ; H2 (doble)
+    file_checksum resd 1        ; checksum del archivo original
+    header_buffer resb 20       ; buffer para la cabecera (20 bytes)
+    data_size resq 1            ; tamaño de datos (sin cabecera)
 
 section .text
 
@@ -61,14 +66,12 @@ _start:
     WRITE STDOUT, banner, banner_len
     
     ; Extraer argumentos
-    ; argv[0] = nombre programa
     ; argv[1] = "encrypt" o "decrypt"
     ; argv[2] = archivo entrada
     ; argv[3] = archivo salida
     ; argv[4] = clave
     
     ; Obtener argv[1] (modo)
-    mov rax, [rsp + 8]          ; argv[0]
     mov rax, [rsp + 16]         ; argv[1]
     
     ; Comparar si es "encrypt"
@@ -100,8 +103,7 @@ _start:
     
     mov r8, rax                 ; r8 = fd entrada
     
-    ; Leer archivo completo con mmap
-    ; Primero, obtener tamaño con lseek
+    ; Obtener tamaño con lseek
     mov rdi, r8
     xor rsi, rsi
     mov rdx, SEEK_END
@@ -118,8 +120,8 @@ _start:
     syscall
     
     ; Mmap: mapear el archivo en memoria
-    xor rdi, rdi                ; addr = NULL (automático)
-    mov rsi, [input_size]       ; len = tamaño del archivo
+    xor rdi, rdi                ; addr = NULL
+    mov rsi, [input_size]       ; len = tamaño
     mov rdx, PROT_READ | PROT_WRITE
     mov r10, MAP_PRIVATE
     mov r8, r8                  ; fd
@@ -130,40 +132,17 @@ _start:
     cmp rax, -1
     je .error_abriendo
     
-    mov [input_buffer], rax     ; guardar puntero al buffer
+    mov [input_buffer], rax     ; guardar puntero
     
     ; Cerrar archivo de entrada
     mov rdi, r8
     mov rax, SYS_CLOSE
     syscall
     
-    ; ===== CALCULAR ENTROPÍA ANTES DEL CIFRADO =====
-    
-    WRITE STDOUT, msg_entropy_before, msg_entropy_before_len
-    
-    ; Limpiar tabla de frecuencias
-    call frequency_clear
-    
-    ; Contar frecuencias en el buffer original
-    mov rdi, [input_buffer]
-    mov rsi, [input_size]
-    call frequency_count
-    
-    ; Calcular entropía H1
-    mov rdi, [input_size]
-    call entropy_calculate
-    ; Resultado en ST0
-    
-    ; Guardar H1 en memory (desde ST0 del FPU)
-    fstp qword [entropy_before] ; guardar double desde FPU a memoria
-    
-    ; ===== APLICAR CIFRADO =====
-    
     ; Obtener clave (argv[4])
     mov rax, [rsp + 40]         ; argv[4]
     
     ; Convertir string de clave a uint64_t
-    ; Por ahora, usamos los primeros 8 bytes como clave
     movzx rdx, byte [rax]
     mov r9, rdx
     movzx rdx, byte [rax + 1]
@@ -188,6 +167,43 @@ _start:
     shl rdx, 56
     or r9, rdx
     
+    ; r9 contiene la clave
+    
+    ; Decidir si encrypt o decrypt
+    cmp qword [mode_is_encrypt], 1
+    je .do_encrypt
+    
+    ; ===== DECRYPT =====
+    jmp .do_decrypt
+    
+.do_encrypt:
+    ; ===== ENCRYPT =====
+    
+    ; ===== CALCULAR CHECKSUM DEL ORIGINAL =====
+    
+    mov rdi, [input_buffer]
+    mov rsi, [input_size]
+    call header_checksum
+    mov [file_checksum], eax
+    
+    ; ===== CALCULAR ENTROPÍA ANTES DEL CIFRADO =====
+    
+    WRITE STDOUT, msg_entropy_before, msg_entropy_before_len
+    
+    call frequency_clear
+    
+    mov rdi, [input_buffer]
+    mov rsi, [input_size]
+    call frequency_count
+    
+    mov rdi, [input_size]
+    call entropy_calculate
+    
+    lea rax, [rel entropy_before]
+    fstp qword [rax]
+    
+    ; ===== APLICAR CIFRADO =====
+    
     ; Llamar cipher_xor(buffer, length, key)
     mov rdi, [input_buffer]
     mov rsi, [input_size]
@@ -198,23 +214,24 @@ _start:
     
     WRITE STDOUT, msg_entropy_after, msg_entropy_after_len
     
-    ; Limpiar tabla de frecuencias
     call frequency_clear
     
-    ; Contar frecuencias en el buffer cifrado
     mov rdi, [input_buffer]
     mov rsi, [input_size]
     call frequency_count
     
-    ; Calcular entropía H2
     mov rdi, [input_size]
     call entropy_calculate
-    ; Resultado en ST0
     
-    ; Guardar H2 en memory
     lea rax, [rel entropy_after]
     fstp qword [rax]
-
+    
+    ; ===== CONSTRUIR CABECERA =====
+    
+    mov rdi, header_buffer      ; dirección absoluta
+    mov rsi, [input_size]
+    mov edx, [file_checksum]
+    call header_build
     
     ; ===== ESCRIBIR ARCHIVO DE SALIDA =====
     
@@ -232,10 +249,118 @@ _start:
     
     mov r8, rax                 ; r8 = fd salida
     
-    ; Escribir buffer cifrado
+    ; Escribir cabecera (20 bytes)
+    mov rdi, r8
+    mov rsi, header_buffer      ; dirección absoluta
+    mov rdx, 20                 ; tamaño de HEADER en bytes
+    mov rax, SYS_WRITE
+    syscall
+    
+    ; Escribir datos cifrados
     mov rdi, r8
     mov rsi, [input_buffer]
     mov rdx, [input_size]
+    mov rax, SYS_WRITE
+    syscall
+    
+    ; Cerrar archivo de salida
+    mov rdi, r8
+    mov rax, SYS_CLOSE
+    syscall
+    
+    ; Munmap
+    mov rdi, [input_buffer]
+    mov rsi, [input_size]
+    mov rax, SYS_MUNMAP
+    syscall
+    
+    ; Éxito
+    WRITE STDOUT, msg_success, msg_success_len
+    EXIT 0
+
+.do_decrypt:
+    ; ===== DECRYPT =====
+    
+    ; Tamaño total = tamaño_cabecera + tamaño_datos
+    ; tamaño_datos = input_size - 20
+    
+    mov rax, [input_size]
+    sub rax, 20
+    mov [data_size], rax
+    
+    ; Leer y validar cabecera (primeros 20 bytes)
+    mov rdi, [input_buffer]
+    call header_validate
+    
+    ; rax = 0 si es válida, 1 o 2 si hay error
+    cmp rax, 0
+    jne .error_abriendo
+    
+    ; ===== CALCULAR ENTROPÍA ANTES DEL DESCIFRADO (datos cifrados) =====
+    
+    WRITE STDOUT, msg_entropy_before, msg_entropy_before_len
+    
+    call frequency_clear
+    
+    ; frequency_count sobre los datos cifrados (después de la cabecera)
+    mov rdi, [input_buffer]
+    add rdi, 20                 ; saltar cabecera
+    mov rsi, [data_size]
+    call frequency_count
+    
+    mov rdi, [data_size]
+    call entropy_calculate
+    
+    lea rax, [rel entropy_before]
+    fstp qword [rax]
+    
+    ; ===== APLICAR DESCIFRADO =====
+    
+    ; Llamar cipher_xor sobre los datos (después de cabecera)
+    mov rdi, [input_buffer]
+    add rdi, 20                 ; saltar cabecera
+    mov rsi, [data_size]
+    mov rdx, r9
+    call cipher_xor
+    
+    ; ===== CALCULAR ENTROPÍA DESPUÉS DEL DESCIFRADO (datos descifrados) =====
+    
+    WRITE STDOUT, msg_entropy_after, msg_entropy_after_len
+    
+    call frequency_clear
+    
+    mov rdi, [input_buffer]
+    add rdi, 20                 ; saltar cabecera
+    mov rsi, [data_size]
+    call frequency_count
+    
+    mov rdi, [data_size]
+    call entropy_calculate
+    
+    lea rax, [rel entropy_after]
+    fstp qword [rax]
+    
+    ; ===== ESCRIBIR ARCHIVO DE SALIDA (datos descifrados sin cabecera) =====
+    
+    ; Obtener argv[3] (archivo salida)
+    mov rdi, [rsp + 32]         ; argv[3]
+    
+    ; Abrir archivo de salida en escritura
+    mov rax, SYS_OPEN
+    mov rsi, O_WRONLY | O_CREAT | O_TRUNC
+    mov rdx, 0o644              ; permisos
+    syscall
+    
+    cmp rax, 0
+    jl .error_abriendo
+    
+    mov r8, rax                 ; r8 = fd salida
+    
+    ; Escribir solo los datos descifrados (sin cabecera)
+    mov rdi, r8
+    mov rsi, [input_buffer]
+    add rsi, 20                 ; saltar cabecera
+    mov rdx, [data_size]
     mov rax, SYS_WRITE
     syscall
     

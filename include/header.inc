@@ -15,4 +15,6 @@ struc HEADER
     .reserved:     resw 1
 endstruc
 
+%define HEADER_size 20          ; 4+2+8+4+2 = 20 bytes
+
 %endif
