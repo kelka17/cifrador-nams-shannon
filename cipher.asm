@@ -43,8 +43,9 @@ section .text
 ; =============================================================================
 ; cipher_build_key64 — Convierte una cadena ASCII en una clave de 64 bits
 ; =============================================================================
-; void cipher_build_key64(const char *key_str)
+; uint64_t cipher_build_key64(const char *key_str)
 ;   rdi = puntero a la cadena clave (null-terminated)
+;   rax = clave de 64 bits (también guardada en key64 global)
 ;
 ; La clave se almacena en la variable global key64.
 ; Mezcla hasta los primeros 8 bytes de la cadena en little-endian.
