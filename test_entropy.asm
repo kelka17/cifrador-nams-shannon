@@ -48,6 +48,22 @@
 ;     FCHS  → ST0=+0.5
 ;   H = 0.5 + 0.5 = 1.0 bits/byte  → millis = 1000
 ;
+; ── TEST 5 — entropy_calculate, H = 3 bits/byte ──────────────────────────────
+;   Buffer: "ABCDEFGH" (8 bytes, 8 símbolos distintos con p=⅛ c/u)
+;   Secuencia FPU para p=1/8:
+;     FDIVP → ST0=1/8=0.125
+;     FYL2X → ST0=0.125·log₂(0.125)=0.125·(−3.0)=−0.375  [log₂(2⁻³)=−3 exacto]
+;     FCHS  → ST0=+0.375
+;   H = 8 × 0.375 = 3.0 bits/byte  → millis = 3000
+;
+; ── TEST 6 — entropy_calculate, H = 8 bits/byte (máximo teórico) ─────────────
+;   Tabla: frequency_table[i] = 1 ∀ i ∈ [0,255], total = 256
+;   Secuencia FPU para p=1/256=2⁻⁸:
+;     FDIVP → ST0=2⁻⁸
+;     FYL2X → ST0=2⁻⁸·log₂(2⁻⁸)=2⁻⁸·(−8)=−1/32  [log₂(2⁻⁸)=−8 exacto]
+;     FCHS  → ST0=+1/32
+;   H = 256 × (1/32) = 8.0 bits/byte (máximo posible) → millis = 8000
+;
 ; =============================================================================
 
 %include "include/syscalls.inc"
@@ -76,6 +92,8 @@ section .rodata
     hdr_count    db "=== TEST 2: frequency_count('AABBC', 5) ===", 0
     hdr_h0       db "=== TEST 3: entropy_calculate — H = 0.000 bits/byte (mono-simbolo) ===", 0
     hdr_h1       db "=== TEST 4: entropy_calculate — H = 1.000 bits/byte (dos simbolos p=1/2) ===", 0
+    hdr_h3       db "=== TEST 5: entropy_calculate — H = 3.000 bits/byte (8 simbolos p=1/8) ===", 0
+    hdr_h8       db "=== TEST 6: entropy_calculate — H = 8.000 bits/byte (256 simbolos, maximo) ===", 0
     hdr_done     db "=== TODOS LOS TESTS PASARON ===", 0
 
     ; ── etiquetas de items ───────────────────────────────────────────────────
@@ -94,6 +112,7 @@ section .rodata
     buf_AABBC    db 0x41, 0x41, 0x42, 0x42, 0x43   ; "AABBC" — 5 bytes
     buf_AAAA     db 0x41, 0x41, 0x41, 0x41          ; 4 × 'A'  (mono-símbolo)
     buf_AB       db 0x41, 0x42                       ; 'A', 'B' (equiprobables)
+    buf_ABCDEFGH db "ABCDEFGH"                       ; 8 símbolos distintos
 
 ; =============================================================================
 ; MACROS
@@ -178,6 +197,7 @@ section .text
 ; =============================================================================
 
 _start:
+    push rbx                   ; callee-saved — usado en fill loop TEST 6
     push r12                   ; callee-saved — millis resultado
     push r13                   ; callee-saved — base de frequency_table
 
@@ -303,6 +323,75 @@ _start:
     ASSERT_EQ64 r12, 1000
 
 ; =============================================================================
+; TEST 5 — entropy_calculate: H = 3 (8 símbolos, p = ⅛ cada uno)
+; =============================================================================
+    SECTION_HDR hdr_h3
+
+    call frequency_clear
+    mov  rdi, buf_ABCDEFGH
+    mov  rsi, 8
+    call frequency_count
+
+    mov  rdi, 8
+    call entropy_calculate       ; ST0 = H = 3.0
+                                 ; (log₂(1/8)=−3 exacto → 8×(1/8×3)=3)
+
+    ST0_TO_MILLI r12             ; r12 = 3000
+
+    mov  rdi, lbl_milli
+    call io_print_string
+    mov  rdi, r12
+    call io_print_uint64
+    call io_print_newline
+
+    mov  rdi, lbl_exp
+    call io_print_string
+    mov  rdi, 3000
+    call io_print_uint64
+    call io_print_newline
+
+    mov  rdi, lbl_cmp
+    call io_print_string
+    ASSERT_EQ64 r12, 3000
+
+; =============================================================================
+; TEST 6 — entropy_calculate: H = 8 (256 símbolos con freq=1, máximo)
+; =============================================================================
+    SECTION_HDR hdr_h8
+
+    ; cargar frequency_table[i] = 1 ∀ i ∈ [0,255] directamente (sin frequency_count)
+    ; simula un archivo con exactamente un byte de cada valor posible
+    lea  rbx, [rel frequency_table]
+    mov  rcx, 256
+.fill_uniform:
+    mov  qword [rbx], 1
+    add  rbx, 8
+    dec  rcx
+    jnz  .fill_uniform
+
+    mov  rdi, 256
+    call entropy_calculate       ; ST0 = H = 8.0
+                                 ; (log₂(1/256)=−8 exacto → 256×(1/256×8)=8)
+
+    ST0_TO_MILLI r12             ; r12 = 8000
+
+    mov  rdi, lbl_milli
+    call io_print_string
+    mov  rdi, r12
+    call io_print_uint64
+    call io_print_newline
+
+    mov  rdi, lbl_exp
+    call io_print_string
+    mov  rdi, 8000
+    call io_print_uint64
+    call io_print_newline
+
+    mov  rdi, lbl_cmp
+    call io_print_string
+    ASSERT_EQ64 r12, 8000
+
+; =============================================================================
 ; FIN
 ; =============================================================================
     call io_print_newline
@@ -310,5 +399,6 @@ _start:
 
     pop  r13
     pop  r12
+    pop  rbx
     mov  rdi, 0
     call sys_exit
