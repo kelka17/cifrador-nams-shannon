@@ -21,5 +21,11 @@ $(TARGET): $(OBJ)
 run: $(TARGET)
 	./$(TARGET)
 
+test_header: test_header.o header.o io.o cipher.o transpose.o
+	$(LD) -o $@ $^
+
+test_header.o: test_header.asm include/syscalls.inc include/header.inc
+	$(NASM) $(NASMFLAGS) -o $@ $<
+
 clean:
-	rm -f $(OBJ) $(TARGET)
+	rm -f $(OBJ) $(TARGET) test_header test_header.o
