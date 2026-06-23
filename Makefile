@@ -21,5 +21,11 @@ $(TARGET): $(OBJ)
 run: $(TARGET)
 	./$(TARGET)
 
+test_entropy: test_entropy.o entropy.o io.o display.o
+	$(LD) -o $@ $^
+
+test_entropy.o: test_entropy.asm include/syscalls.inc
+	$(NASM) $(NASMFLAGS) -o $@ $<
+
 clean:
-	rm -f $(OBJ) $(TARGET)
+	rm -f $(OBJ) $(TARGET) test_entropy test_entropy.o
