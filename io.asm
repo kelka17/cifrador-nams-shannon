@@ -89,6 +89,8 @@ global io_file_write_buf
 global io_alloc
 global io_free
 
+global io_close_and_exit
+
 ; =============================================================================
 section .data
 ; =============================================================================
@@ -577,6 +579,43 @@ io_free:
     mov  rax, SYS_MUNMAP
     syscall
     ret
+
+; ─── io_close_and_exit ───────────────────────────────────────────────────────
+; [noreturn] void io_close_and_exit(int fd, int code)
+;   rdi = descriptor a cerrar
+;   rsi = código de salida deseado (0 = éxito, ≠0 = error de la aplicación)
+;
+; Comportamiento:
+;   1. Llama sys_close(fd).
+;   2. Si sys_close tiene éxito (rax == 0), sale con el código recibido en rsi.
+;   3. Si sys_close falla  (rax <  0), sale con -rax (errno positivo) para
+;      que el shell pueda detectar la causa del fallo: "exit $?"
+;
+; Convención de códigos usada en el proyecto:
+;   0          — éxito
+;   1..127     — errores de la aplicación (definidos por el caller)
+;   errno > 0  — error del kernel en sys_close (EBADF=9, EIO=5, etc.)
+;
+; Esta función nunca retorna al caller.
+io_close_and_exit:
+    push rsi                        ; preservar código de salida deseado
+
+    ; sys_close(fd) — rdi ya contiene el fd
+    mov  rax, SYS_CLOSE
+    syscall                         ; rax = 0 éxito | -errno en error
+
+    pop  rdi                        ; rdi = código de salida deseado
+
+    test rax, rax
+    jns  .cae_exit                  ; rax >= 0: close OK → usar código original
+
+    neg  rax                        ; rax = errno positivo (p.ej. EBADF=9)
+    mov  rdi, rax                   ; código de salida = errno del fallo
+
+.cae_exit:
+    mov  rax, SYS_EXIT
+    syscall
+    ; zona muerta: el kernel terminó el proceso
 
 ; ─── io_file_write_buf ───────────────────────────────────────────────────────
 ; ssize_t io_file_write_buf(int fd, const void *buf, uint64_t len)
