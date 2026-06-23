@@ -24,6 +24,11 @@
 ;     E^2=0x45^0x32=0x77  F^3=0x46^0x33=0x75  G^4=0x47^0x34=0x73  H^5=0x48^0x35=0x7D
 ;     qword LE = 0x7D737577751A070A
 ;
+;   Descifrado = ciphertext XOR key64 (misma operacion XOR):
+;     0x0A^0x4B=0x41='A'  0x07^0x45=0x42='B'  0x1A^0x59=0x43='C'  0x75^0x31=0x44='D'
+;     0x77^0x32=0x45='E'  0x75^0x33=0x46='F'  0x73^0x34=0x47='G'  0x7D^0x35=0x48='H'
+;     qword LE = 0x4847464544434241  (identico al plaintext original)
+;
 ; =============================================================================
 
 %include "include/syscalls.inc"
@@ -49,7 +54,8 @@ section .rodata
     msg_fail     db " [FAIL]", 10, 0
 
     hdr_build    db "=== TEST 1: cipher_build_key64 ===", 0
-    hdr_xor      db "=== TEST 2: cipher_xor (bloque de 8 bytes) ===", 0
+    hdr_xor      db "=== TEST 2: cipher_xor (cifrado, 1 bloque) ===", 0
+    hdr_decrypt  db "=== TEST 3: cipher_xor (descifrado = misma operacion XOR) ===", 0
     hdr_done     db "=== TODOS LOS TESTS PASARON ===", 0
 
     lbl_key_exp  db "  esperada -> ", 0
@@ -59,6 +65,10 @@ section .rodata
     lbl_ct_got   db "  cifrado  -> ", 0
     lbl_ct_exp   db "  esperado -> ", 0
     lbl_ct_cmp   db "  resultado   ", 0
+    lbl_dc_in    db "  ciphertext  ", 0
+    lbl_dc_got   db "  descifrado  ", 0
+    lbl_dc_exp   db "  esperado -> ", 0
+    lbl_dc_cmp   db "  resultado   ", 0
 
     key_str      db "KEY12345", 0   ; null-terminated
     plaintext    db "ABCDEFGH"      ; 8 bytes exactos, SIN null
@@ -192,6 +202,60 @@ _start:
     call io_print_string
     mov  rax, qword [rbx]           ; ciphertext obtenido en rax
     ASSERT_EQ64 rax, 0x7D737577751A070A
+
+    ; ── liberar buffer ────────────────────────────────────────────────────────
+    mov  rdi, rbx
+    mov  rsi, 8
+    call io_free
+
+; =============================================================================
+; TEST 3 — cipher_xor aplicado al ciphertext → recupera el plaintext original
+;
+;   PRINCIPIO: XOR es auto-inverso. Si C = P XOR K, entonces C XOR K = P.
+;   La MISMA función cipher_xor sirve tanto para cifrar como para descifrar.
+;   Solo cambia el contenido del buffer de entrada (plaintext vs ciphertext).
+; =============================================================================
+    SECTION_HDR hdr_decrypt
+
+    ; ── asignar buffer y cargar el ciphertext conocido (TEST 2) ─────────────
+    mov  rdi, 8
+    call io_alloc                   ; rax = buf_ptr
+    mov  rbx, rax                   ; rbx = buf_ptr (callee-saved)
+
+    mov  rax, 0x7D737577751A070A    ; ciphertext del TEST 2
+    mov  qword [rbx], rax
+
+    ; ── mostrar ciphertext de entrada ────────────────────────────────────────
+    mov  rdi, lbl_dc_in
+    call io_print_string
+    mov  rdi, qword [rbx]
+    call io_print_hex64
+    call io_print_newline
+
+    ; ── descifrar: cipher_xor(buf, 8, key64)  [misma llamada que al cifrar] ──
+    mov  rdi, rbx                   ; arg1 = buffer con ciphertext
+    mov  rsi, 8                     ; arg2 = longitud
+    mov  rdx, r12                   ; arg3 = misma key64 (r12 aún válido)
+    call cipher_xor                 ; descifra in-place
+
+    ; ── mostrar resultado obtenido vs plaintext esperado ─────────────────────
+    mov  rdi, lbl_dc_got
+    call io_print_string
+    mov  rdi, qword [rbx]
+    call io_print_hex64
+    call io_print_newline
+
+    mov  rdi, lbl_dc_exp
+    call io_print_string
+    mov  rdi, 0x4847464544434241    ; "ABCDEFGH" como qword LE
+    call io_print_hex64
+    call io_print_newline
+
+    ; ── verificar que se recuperó el plaintext exacto ────────────────────────
+    mov  rdi, lbl_dc_cmp
+    call io_print_string
+    mov  rax, qword [rbx]
+    ASSERT_EQ64 rax, 0x4847464544434241
 
     ; ── liberar buffer ────────────────────────────────────────────────────────
     mov  rdi, rbx
