@@ -3,29 +3,77 @@
 ; Proyecto:    Cifrador/Descifrador con Análisis de Entropía de Shannon
 ; Asignatura:  Taller de Programación en Bajo Nivel
 ; Universidad: UMSS — Facultad de Ciencias y Tecnología
-; Autor(es):   [Nombre Apellido]
-; Fecha:       [DD/MM/AAAA]
-; Descripción: Transposición reversible de bytes mediante BSWAP (auto-inversa).
 ; =============================================================================
 ;
-; PRINCIPIO DE LA TRANSPOSICIÓN:
-;   BSWAP invierte el orden de los 8 bytes de un registro de 64 bits:
-;     byte0 byte1 byte2 byte3 byte4 byte5 byte6 byte7
-;       →   byte7 byte6 byte5 byte4 byte3 byte2 byte1 byte0
+; ─────────────────────────────────────────────────────────────────────────────
+; 1. PROPÓSITO CRIPTOGRÁFICO: DIFUSIÓN
+; ─────────────────────────────────────────────────────────────────────────────
 ;
-;   Al ser auto-inversa (BSWAP·BSWAP = identidad), la misma operación sirve
-;   para cifrar y descifrar.  transpose_encrypt y transpose_decrypt son
-;   idénticas y comparten la misma implementación interna.
+;   El cifrado XOR stream solo produce "confusión" (cada byte de salida depende
+;   de un único byte de la clave), pero no "difusión" (C. Shannon, 1949):
+;   un cambio en un bit de plaintext afecta exactamente un bit de ciphertext.
 ;
-;   Bytes residuales (0..7 al final del buffer):
-;     Se mezclan byte a byte con su espejo dentro del residuo usando XOR.
-;     P.ej. para 3 residuos [a, b, c]: resultado = [c, b, a] (mismo efecto
-;     que BSWAP sobre los bytes significativos).
-;     Esta operación también es auto-inversa.
+;   La transposición de bytes aumenta la difusión al mezclar las posiciones de
+;   los bytes DENTRO de cada bloque de 8 bytes después del XOR.  Así, un bit
+;   modificado en el plaintext termina en una posición distinta del bloque
+;   cifrado final, dificultando el análisis estadístico.
 ;
-; CONVENCIÓN DE LLAMADA: System V AMD64 ABI
-;   rdi = puntero al buffer (modificado in-place)
-;   rsi = longitud en bytes
+; ─────────────────────────────────────────────────────────────────────────────
+; 2. DEFINICIÓN FORMAL DE LA TRANSPOSICIÓN
+; ─────────────────────────────────────────────────────────────────────────────
+;
+;   Sea B = (b₀, b₁, b₂, b₃, b₄, b₅, b₆, b₇) un bloque de 8 bytes en memoria.
+;
+;   Permutación de cifrado:
+;     π: {0,…,7} → {0,…,7}   donde   π(i) = 7 − i
+;     T(B) = (b₇, b₆, b₅, b₄, b₃, b₂, b₁, b₀)
+;
+;   TEOREMA (auto-inversa): T(T(B)) = B
+;     Prueba: T(T(B))_i = T(B)_{π(i)} = T(B)_{7-i} = B_{π(7-i)} = B_{7-(7-i)} = B_i ∎
+;
+;   Para r bytes residuales (0 ≤ r ≤ 7):
+;     Permutación espejo: σ: {0,…,r-1} → {0,…,r-1}   donde   σ(i) = r − 1 − i
+;     TEOREMA (auto-inversa): σ(σ(i)) = σ(r-1-i) = r-1-(r-1-i) = i ∎
+;
+;   COROLARIO: transpose_encrypt y transpose_decrypt son IDÉNTICAS.
+;     transpose_encrypt(T(B)) = T(T(B)) = B = transpose_decrypt(T(B))
+;
+; ─────────────────────────────────────────────────────────────────────────────
+; 3. IMPLEMENTACIÓN: INSTRUCCIÓN BSWAP
+; ─────────────────────────────────────────────────────────────────────────────
+;
+;   x86-64 provee BSWAP reg64, que invierte los 8 bytes de un registro en
+;   una sola instrucción (1 micro-op, latencia 1 ciclo en CPUs modernas).
+;
+;   Relación entre memoria, little-endian y BSWAP:
+;
+;     Dirección:     buf+0  buf+1  buf+2  buf+3  buf+4  buf+5  buf+6  buf+7
+;     Bytes:          b₀     b₁     b₂     b₃     b₄     b₅     b₆     b₇
+;
+;     MOV rax,[buf] → rax = b₇b₆b₅b₄b₃b₂b₁b₀  (b₀ en LSB, b₇ en MSB)
+;     BSWAP rax     → rax = b₀b₁b₂b₃b₄b₅b₆b₇  (invierte bytes del registro)
+;     MOV [buf],rax → buf = [b₇, b₆, b₅, b₄, b₃, b₂, b₁, b₀]  (b₀ queda en buf+7)
+;
+;   El efecto neto en memoria es exactamente la permutación π(i) = 7 − i.
+;
+; ─────────────────────────────────────────────────────────────────────────────
+; 4. COMPLEJIDAD
+; ─────────────────────────────────────────────────────────────────────────────
+;
+;   Sea n la longitud del buffer, q = ⌊n/8⌋ bloques, r = n mod 8 residuos.
+;
+;   FASE 1 (bloques): q iteraciones × O(1) = O(n/8) ⊂ O(n)
+;   FASE 2 (residuo): ⌊r/2⌋ ≤ 3 iteraciones = O(1)
+;   Total: O(n) tiempo, O(1) espacio adicional.
+;
+; ─────────────────────────────────────────────────────────────────────────────
+; 5. CONVENCIÓN DE LLAMADA: System V AMD64 ABI
+; ─────────────────────────────────────────────────────────────────────────────
+;
+;   Paso de argumentos:  rdi, rsi, rdx, rcx, r8, r9
+;   Valor de retorno:    rax  (esta función retorna void)
+;   Callee-saved:        rbx, rbp, r12, r13, r14, r15
+;
 ; =============================================================================
 
 global transpose_encrypt
@@ -36,72 +84,111 @@ section .text
 ; =============================================================================
 
 ; =============================================================================
-; transpose_encrypt — transposición BSWAP in-place (cifrado)
+; transpose_encrypt — permutación de bytes (cifrado, aumenta difusión)
 ; =============================================================================
 ; void transpose_encrypt(uint8_t *buffer, uint64_t length)
-;   rdi = puntero al buffer
-;   rsi = longitud en bytes
+;   Precondición:  rdi apunta a un buffer de al menos 'length' bytes.
+;                  rsi = length ≥ 0.
+;   Postcondición: buffer[i] = buffer_in[π⁻¹(i)] donde π(i) = 7−i dentro de
+;                  cada bloque, y σ(i)=r−1−i para los residuos finales.
+;   Efecto neto:   inversión del orden de bytes por bloque (BSWAP in-place).
+;
+; TABLA DE REGISTROS:
+;   rdi  cursor que avanza de bloque en bloque (8B/iter en FASE 1)
+;   rsi  longitud total en bytes (preserved para cálculo de residuos)
+;   rcx  FASE 1: contador de bloques pendientes
+;   rax  bloque leído del buffer antes y después de BSWAP
+;   rbx  callee-saved: puntero al extremo derecho del residuo (FASE 2)
+;
+; INVARIANTE FASE 1 (al inicio de cada iteración):
+;   rdi = &buffer[8k], k = bloques ya transpuestos
+;   rcx = q − k  (bloques pendientes, q = ⌊length/8⌋)
+;   buffer[0..8k-1] ya ha sido correctamente transpuesto.
+;
+; INVARIANTE FASE 2 (al inicio de cada iteración):
+;   rdi < rbx  (punteros sin cruzar; el cruce indica fin)
+;   Los bytes en [rdi, rbx] aún no han sido intercambiados.
+;   Los bytes fuera de [rdi, rbx] ya están en su posición final.
 transpose_encrypt:
-    jmp  tp_bswap_inplace       ; idéntica a transpose_decrypt
+    jmp  tp_bswap_inplace           ; idéntica a transpose_decrypt (ver §2 corolario)
 
 ; =============================================================================
-; transpose_decrypt — transposición BSWAP in-place (descifrado)
+; transpose_decrypt — permutación inversa (descifrado)
 ; =============================================================================
 ; void transpose_decrypt(uint8_t *buffer, uint64_t length)
-;   rdi = puntero al buffer
-;   rsi = longitud en bytes
+;   Precondición / Postcondición: idénticas a transpose_encrypt.
+;   Corrección: como π y σ son auto-inversas (Teorema §2), aplicar la misma
+;   permutación sobre el buffer transpuesto recupera el original exactamente.
+;
+; DEMOSTRACIÓN DE CORRECCIÓN DEL DESCIFRADO:
+;   Sea B el bloque original y T = transpose_encrypt.
+;   Ciframos: B' = T(B).
+;   Desciframos: T(B') = T(T(B)) = B  (por auto-inversa de T).
+;   Por lo tanto, transpose_decrypt ≡ transpose_encrypt. ∎
 transpose_decrypt:
-    ; cae directamente a tp_bswap_inplace (auto-inversa)
+    ; cae a tp_bswap_inplace — la auto-inversa garantiza la corrección
 
 ; ─── tp_bswap_inplace — implementación compartida ────────────────────────────
-; rdi = buffer, rsi = length
 tp_bswap_inplace:
-    test rsi, rsi               ; ¿longitud == 0?
-    jz   .tp_done               ; sí → nada que hacer
+    test rsi, rsi                   ; ¿length == 0?
+    jz   .tp_done
 
-    ; ── FASE 1: bloques completos de 8 bytes ─────────────────────────────────
+    ; ── FASE 1: bloques completos de 8 bytes con BSWAP ───────────────────────
+    ;
+    ;   Por cada bloque k ∈ [0, q-1]:
+    ;     rax ← MOV [buf + 8k]     (carga b₀…b₇ en little-endian)
+    ;     rax ← BSWAP rax          (invierte bytes del registro)
+    ;     [buf + 8k] ← rax         (guarda b₇…b₀ en memoria)
+    ;
     mov  rcx, rsi
-    shr  rcx, 3                 ; rcx = length / 8  (bloques completos)
-    jz   .tp_residual           ; 0 bloques → ir directo a residuos
+    shr  rcx, 3                     ; rcx = q = ⌊length/8⌋
+    jz   .tp_residual               ; q == 0 → saltar directo a residuos
 
 .tp_block_loop:
-    mov  rax, [rdi]             ; cargar 8 bytes en rax
-    bswap rax                   ; invertir orden de bytes dentro del qword
-    mov  [rdi], rax             ; guardar resultado en el mismo lugar
+    mov   rax, [rdi]                ; cargar bloque de 8 bytes
+    bswap rax                       ; invertir orden: b₀↔b₇, b₁↔b₆, b₂↔b₅, b₃↔b₄
+    mov   [rdi], rax                ; guardar bloque transpuesto
 
-    add  rdi, 8                 ; avanzar puntero al siguiente bloque
+    add  rdi, 8                     ; avanzar cursor al siguiente bloque
     dec  rcx
-    jnz  .tp_block_loop         ; repetir si quedan bloques
+    jnz  .tp_block_loop
 
-    ; ── FASE 2: bytes residuales (0..7 bytes al final) ───────────────────────
-    ; Se intercambian byte a byte usando dos punteros: izq (rdi) y der (rbx).
-    ; La condición de parada es rdi < rbx; si son iguales o se cruzan, listo.
+    ; ── FASE 2: r bytes residuales (intercambio espejo con dos punteros) ─────
+    ;
+    ;   Sea r = length mod 8.  Los bytes residuales están en [rdi, rdi+r-1].
+    ;   Se usa el algoritmo de inversión con dos punteros:
+    ;     izq = rdi  (avanza hacia la derecha)
+    ;     der = rdi + r - 1  (retrocede hacia la izquierda)
+    ;   Mientras izq < der: swap(buf[izq], buf[der]); izq++; der--
+    ;
+    ;   Este algoritmo implementa σ(i) = r − 1 − i en ⌊r/2⌋ pasos.
+    ;   Es auto-inverso por el Teorema §2.
+    ;
 .tp_residual:
     mov  rcx, rsi
-    and  rcx, 7                 ; rcx = length % 8  (0..7 residuos)
-    jz   .tp_done               ; sin residuos
+    and  rcx, 7                     ; rcx = r = length mod 8
+    jz   .tp_done                   ; r == 0 → no hay residuos
 
-    ; rdi ya apunta al primer byte residual (avanzó en la fase 1)
-    push rbx                    ; preservar registro callee-saved (ABI)
+    push rbx                        ; preservar callee-saved (ABI)
+    lea  rbx, [rdi + rcx - 1]      ; rbx = puntero al último byte residual
 
-    lea  rbx, [rdi + rcx - 1]  ; rbx = puntero al último byte residual
-
+    ; INVARIANTE: bytes en (−∞, rdi) y (rbx, +∞) ya en posición final
 .tp_swap_loop:
-    cmp  rdi, rbx               ; ¿punteros se cruzaron o coinciden?
-    jge  .tp_swap_done          ; sí → fin del intercambio
+    cmp  rdi, rbx                   ; ¿rdi >= rbx? (punteros cruzados o iguales)
+    jge  .tp_swap_done
 
-    movzx rax, byte [rdi]       ; al = byte izquierdo
-    movzx rdx, byte [rbx]       ; dl = byte derecho
+    movzx rax, byte [rdi]           ; leer byte izquierdo
+    movzx rdx, byte [rbx]           ; leer byte derecho
 
-    mov  [rdi], dl              ; intercambiar
-    mov  [rbx], al
+    mov  [rdi], dl                  ; escribir derecho en posición izquierda
+    mov  [rbx], al                  ; escribir izquierdo en posición derecha
 
-    inc  rdi                    ; avanzar puntero izquierdo
-    dec  rbx                    ; retroceder puntero derecho
+    inc  rdi                        ; izq avanza
+    dec  rbx                        ; der retrocede
     jmp  .tp_swap_loop
 
 .tp_swap_done:
-    pop  rbx                    ; restaurar callee-saved (ABI)
+    pop  rbx                        ; restaurar callee-saved (ABI)
 
 .tp_done:
     ret
