@@ -1,6 +1,11 @@
 ; =============================================================================
-; io.asm — Módulo de Entrada/Salida y Manejo de Archivos
-; Proyecto: Cifrador/Descifrador con Análisis de Entropía de Shannon
+; Archivo:     io.asm
+; Proyecto:    Cifrador/Descifrador con Análisis de Entropía de Shannon
+; Asignatura:  Taller de Programación en Bajo Nivel
+; Universidad: UMSS — Facultad de Ciencias y Tecnología
+; Autor(es):   [Nombre Apellido]
+; Fecha:       [DD/MM/AAAA]
+; Descripción: Wrappers de syscalls Linux x86-64 y utilidades de E/S sin libc.
 ; =============================================================================
 ;
 ; Responsabilidad:
@@ -510,10 +515,10 @@ io_file_size:
 ; Para liberar: io_free(ptr, size).
 ;
 ; syscall mmap(2):
-;   addr   = NULL         → el kernel elige la dirección
-;   len    = size         → tamaño total
-;   prot   = PROT_READ(1) → solo lectura sobre el mapeo de archivo
-;   flags  = MAP_PRIVATE(2) → copia privada; escrituras no afectan el archivo
+;   addr   = NULL                      → el kernel elige la dirección
+;   len    = size                      → tamaño total
+;   prot   = PROT_READ|PROT_WRITE (3) → lectura/escritura (cifrado in-place)
+;   flags  = MAP_PRIVATE(2)            → copia privada; escrituras no afectan el archivo en disco
 ;   fd     = fd
 ;   offset = 0            → desde el inicio del archivo
 ;
@@ -528,8 +533,8 @@ io_file_read_all:
 
     xor  rdi, rdi               ; addr   = NULL
     mov  rsi, r13               ; len    = size
-    mov  rdx, PROT_READ         ; prot   = solo lectura
-    mov  r10, MAP_PRIVATE       ; flags  = copia privada (r10 para syscall)
+    mov  rdx, PROT_READ | PROT_WRITE ; prot = lectura/escritura (cifrado in-place)
+    mov  r10, MAP_PRIVATE            ; flags = copia privada; escrituras no tocan el archivo (r10 para syscall)
     mov  r8,  r12               ; fd
     xor  r9,  r9                ; offset = 0
     mov  rax, SYS_MMAP

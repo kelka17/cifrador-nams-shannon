@@ -56,38 +56,47 @@ section .text
 ; Registros internos:
 ;   rbx = puntero a key_str (callee-saved)
 ;   r12 = acumulador de la clave de 64 bits
-;   rcx = índice del byte actual (0..7)
+;   r13 = índice del byte actual (0..7) — callee-saved; libera rcx para SHL
+;   rcx = desplazamiento en bits (i*8); SHL variable requiere CL obligatoriamente
 ;   al  = byte leído de la cadena
+;
+; NOTA: el índice debe estar en r13 (no en rcx) porque SHL con conteo variable
+; exige que el conteo esté en CL (byte bajo de RCX).  Si rcx fuese el índice
+; i, SHL usaría i como desplazamiento en vez del correcto i*8.
 cipher_build_key64:
-    push rbx
+    push rbx                    ; preservar callee-saved (ABI)
     push r12
+    push r13
 
-    mov  rbx, rdi               ; guardar puntero a la cadena
-    xor  r12, r12               ; acumulador de clave = 0
-    xor  rcx, rcx               ; índice = 0
+    mov  rbx, rdi               ; rbx = puntero a la cadena clave
+    xor  r12, r12               ; r12 = acumulador de clave = 0
+    xor  r13, r13               ; r13 = índice i = 0
 
 .bk_loop:
-    cmp  rcx, 8                 ; ¿ya procesamos 8 bytes?
+    cmp  r13, 8                 ; ¿ya procesamos 8 bytes?
     jge  .bk_done
 
-    movzx rax, byte [rbx + rcx] ; leer byte; zero-extend a 64 bits
+    movzx rax, byte [rbx + r13] ; leer byte[i]; zero-extend a 64 bits
     test  al, al                 ; ¿null terminator?
-    jz    .bk_done               ; sí → cadena terminó antes de 8 bytes
+    jz    .bk_done               ; sí → cadena más corta que 8 bytes
 
-    ; colocar el byte en la posición correcta: byte[i] << (i*8)
-    mov  rdx, rcx
-    shl  rdx, 3                 ; rdx = i * 8  (bits de desplazamiento)
-    shl  rax, cl                ; rax = byte << (i*8)  [cl = rcx & 0xFF]
-    or   r12, rax               ; acumular en la clave
+    ; colocar el byte en su posición little-endian: byte[i] << (i×8)
+    mov  rcx, r13
+    shl  rcx, 3                 ; rcx = i × 8  (desplazamiento en bits)
+    shl  rax, cl                ; rax = byte << (i×8)  ✓  [cl = rcx & 0xFF = i×8]
+    or   r12, rax               ; acumular en la clave de 64 bits
 
-    inc  rcx
+    inc  r13
     jmp  .bk_loop
 
 .bk_done:
-    ; guardar clave de 64 bits en variable global
+    ; guardar clave de 64 bits en variable global key64
     lea  rax, [rel key64]
     mov  [rax], r12
 
+    mov  rax, r12               ; retornar clave en rax (antes de pop r12)
+
+    pop  r13                    ; restaurar callee-saved (ABI, orden inverso)
     pop  r12
     pop  rbx
     ret
