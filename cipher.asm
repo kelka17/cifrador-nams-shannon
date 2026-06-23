@@ -1,35 +1,68 @@
 ; =============================================================================
 ; cipher.asm — Cifrado/Descifrado XOR por bloques de 64 bits
-; Proyecto: Cifrador/Descifrador con Análisis de Entropía de Shannon
+; Proyecto:    Cifrador/Descifrador con Análisis de Entropía de Shannon
+; Asignatura:  Taller de Programación en Bajo Nivel
+; Universidad: UMSS — Facultad de Ciencias y Tecnología
 ; =============================================================================
 ;
-; PRINCIPIO DEL XOR:
-;   Cifrado:    C = P XOR K   (plaintext XOR key  = ciphertext)
-;   Descifrado: P = C XOR K   (ciphertext XOR key = plaintext)
-;   La operación es IDÉNTICA en ambos sentidos → una sola función sirve para
-;   cifrar y descifrar.
+; ─────────────────────────────────────────────────────────────────────────────
+; 1. DEFINICIÓN FORMAL DEL CIFRADO
+; ─────────────────────────────────────────────────────────────────────────────
 ;
-; ESTRATEGIA DE BLOQUES:
-;   ┌─────────────────────────────────────────────┐
-;   │  buffer   [0..7] [8..15] [16..23] … [n-r..n-1]  │
-;   │            bloque bloque  bloque    residuo       │
-;   └─────────────────────────────────────────────┘
-;   • Cada bloque completo de 8 bytes (64 bits) se procesa con un único
-;     MOV de 64 bits + XOR de 64 bits → muy eficiente.
-;   • Los bytes residuales (0 a 7) se procesan byte a byte con el byte
-;     de la clave en la posición correspondiente (key_byte[i % 8]).
+;   Sea P = (P[0], P[1], …, P[n-1])  el texto plano  de n bytes.
+;   Sea K = (K[0], K[1], …, K[7])    la clave de 8 bytes (key64).
+;   Sea C = (C[0], C[1], …, C[n-1])  el texto cifrado de n bytes.
 ;
-; EXPANSIÓN DE CLAVE:
-;   La clave recibida es un puntero a una cadena ASCII (p.ej. "miClave123").
-;   Para obtener una clave de 64 bits se mezclan hasta 8 bytes de la cadena:
-;     key64 = byte[0] | byte[1]<<8 | byte[2]<<16 | … (little-endian)
-;   Si la cadena tiene menos de 8 bytes, los bytes faltantes son 0.
-;   La clave resultante se almacena en la variable local key64 (sección .bss).
+;   Cifrado:    C[i] = P[i] ⊕ K[i mod 8]   para todo i ∈ [0, n-1]
+;   Descifrado: P[i] = C[i] ⊕ K[i mod 8]   para todo i ∈ [0, n-1]
 ;
-; CONVENCIÓN DE LLAMADA: System V AMD64 ABI
-;   Argumentos:    rdi, rsi, rdx, rcx, r8, r9
-;   Retorno:       rax
-;   Callee-saved:  rbx, rbp, r12, r13, r14, r15
+;   Ambas operaciones son IDÉNTICAS porque ⊕ es auto-inverso:
+;     C[i] ⊕ K[i mod 8] = P[i] ⊕ K[i mod 8] ⊕ K[i mod 8] = P[i] ⊕ 0 = P[i]
+;
+; ─────────────────────────────────────────────────────────────────────────────
+; 2. ESTRATEGIA DE IMPLEMENTACIÓN: BLOQUES + RESIDUO
+; ─────────────────────────────────────────────────────────────────────────────
+;
+;   Sea q = ⌊n / 8⌋  (bloques completos)   y   r = n mod 8  (bytes residuales).
+;
+;   ┌──────────────┬──────────────┬─────┬──────────┐
+;   │  bloque 0    │  bloque 1    │ … │  residuo  │
+;   │  P[0..7]     │  P[8..15]    │   │ P[8q..n-1]│
+;   └──────────────┴──────────────┴─────┴──────────┘
+;   └────────────── q bloques de 8 bytes ──────────┘└── r bytes ─┘
+;
+;   FASE 1 — Bloques completos (i ∈ [0, q-1]):
+;     Se carga un QWORD (8 bytes) en rax, se aplica XOR con key64 completo
+;     en una sola instrucción de 64 bits, y se escribe de vuelta.
+;     Coste: 3 accesos a memoria + 1 XOR por bloque → O(n/8).
+;
+;   FASE 2 — Bytes residuales (j ∈ [0, r-1]):
+;     Cada byte P[8q + j] se cifra con K[j mod 8] = (key64 >> (j×8)) & 0xFF.
+;     Como j ∈ [0, 7] y r = n mod 8 ∈ [0, 7], j < 8 siempre, por lo que
+;     j mod 8 = j. No hay desbordamiento del registro de 64 bits.
+;     Coste: 1 acceso a memoria + 1 SHR + 1 XOR por byte residual → O(r) ≤ O(7).
+;
+;   Complejidad total: O(n) tiempo, O(1) espacio adicional.
+;
+; ─────────────────────────────────────────────────────────────────────────────
+; 3. CONSTRUCCIÓN DE LA CLAVE (cipher_build_key64)
+; ─────────────────────────────────────────────────────────────────────────────
+;
+;   Dado un string ASCII s de longitud L:
+;     key64 = ∑ s[i] × 2^(8i)   para i ∈ [0, min(L,8)-1]   (little-endian)
+;
+;   Si L < 8, los bytes faltantes contribuyen con 0 → key64 tiene bytes nulos
+;   en las posiciones superiores. La clave se trunca a 8 bytes si L > 8.
+;
+; ─────────────────────────────────────────────────────────────────────────────
+; 4. CONVENCIÓN DE LLAMADA: System V AMD64 ABI
+; ─────────────────────────────────────────────────────────────────────────────
+;
+;   Paso de argumentos:  rdi, rsi, rdx, rcx, r8, r9
+;   Valor de retorno:    rax
+;   Callee-saved:        rbx, rbp, r12, r13, r14, r15
+;   Caller-saved:        rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11
+;
 ; =============================================================================
 
 global cipher_xor
@@ -41,29 +74,30 @@ section .bss
 section .text
 
 ; =============================================================================
-; cipher_build_key64 — Convierte una cadena ASCII en una clave de 64 bits
+; cipher_build_key64 — Construye la clave de 64 bits desde una cadena ASCII
 ; =============================================================================
 ; uint64_t cipher_build_key64(const char *key_str)
-;   rdi = puntero a la cadena clave (null-terminated)
-;   rax = clave de 64 bits (también guardada en key64 global)
+;   Precondición:  rdi apunta a una cadena null-terminated válida (puede ser "").
+;   Postcondición: rax = key64 = ∑ s[i]×2^(8i) para i ∈ [0,min(|s|,8)-1].
+;                  La variable global key64 contiene el mismo valor.
 ;
-; La clave se almacena en la variable global key64.
-; Mezcla hasta los primeros 8 bytes de la cadena en little-endian.
-; Bytes faltantes (cadena corta) contribuyen con 0.
+; RESTRICCIÓN DE ARQUITECTURA — por qué el índice NO puede estar en rcx:
+;   La instrucción SHL reg, cl requiere que el conteo esté en CL (bits 7..0
+;   de RCX). Si rcx == i, entonces cl == i, y SHL calcularía byte << i en
+;   lugar de byte << (i×8). Por eso el índice i está en r13 (callee-saved)
+;   y rcx sólo almacena el desplazamiento en bits (i×8).
 ;
-; Si la clave es vacía o nula se almacena 0, lo que produce un XOR
-; con 0 (cifrado nulo).  El llamador debe validar antes.
+; TABLA DE REGISTROS:
+;   rbx  callee-saved  puntero base a key_str
+;   r12  callee-saved  acumulador de key64
+;   r13  callee-saved  índice i ∈ [0, 7]
+;   rcx  caller-saved  desplazamiento en bits = i×8  (para SHL)
+;   rax  caller-saved  byte leído y desplazado temporalmente
 ;
-; Registros internos:
-;   rbx = puntero a key_str (callee-saved)
-;   r12 = acumulador de la clave de 64 bits
-;   r13 = índice del byte actual (0..7) — callee-saved; libera rcx para SHL
-;   rcx = desplazamiento en bits (i*8); SHL variable requiere CL obligatoriamente
-;   al  = byte leído de la cadena
-;
-; NOTA: el índice debe estar en r13 (no en rcx) porque SHL con conteo variable
-; exige que el conteo esté en CL (byte bajo de RCX).  Si rcx fuese el índice
-; i, SHL usaría i como desplazamiento en vez del correcto i*8.
+; INVARIANTE DE BUCLE (al inicio de cada iteración):
+;   r12 = ∑ s[j]×2^(8j)  para j ∈ [0, r13-1]
+;   r13 ∈ [0, 8]
+;   Si r13 == 0, r12 == 0 (acumulador vacío).
 cipher_build_key64:
     push rbx                    ; preservar callee-saved (ABI)
     push r12
@@ -103,32 +137,42 @@ cipher_build_key64:
     ret
 
 ; =============================================================================
-; cipher_xor — Cifra/Descifra un buffer en memoria usando XOR de 64 bits
+; cipher_xor — Aplica el cifrado XOR stream sobre un buffer en memoria
 ; =============================================================================
-; void cipher_xor(uint8_t *buffer, uint64_t length, uint64_t key)
-;   rdi = puntero al buffer (modificado IN PLACE)
-;   rsi = longitud en bytes
-;   rdx = clave de 64 bits
+; void cipher_xor(uint8_t *buffer, uint64_t length, uint64_t key64)
+;   Precondición:  rdi apunta a un buffer de al menos 'length' bytes.
+;                  rsi = length ≥ 0.
+;                  rdx = key64 ≠ 0 (si key64 == 0, la función retorna sin cambios).
+;   Postcondición: buffer[i] = buffer_in[i] ⊕ K[i mod 8]  para i ∈ [0, length-1]
+;                  donde K[j] = (key64 >> (j×8)) & 0xFF.
 ;
-; El buffer se modifica directamente (cifrado en sitio).
-; Para descifrar: llamar con los mismos argumentos sobre el buffer cifrado.
+; TABLA DE REGISTROS — cipher_xor:
+;   rdi  caller-saved  cursor al buffer (avanza 8B por bloque, 1B por residuo)
+;   rsi  caller-saved  longitud en bytes (se preserva para calcular residuo)
+;   rdx  caller-saved  key64, constante durante todo el algoritmo
+;   rcx  caller-saved  FASE 1: contador de bloques; FASE 2: desplazamiento de bits
+;   rax  caller-saved  bloque de 8 bytes leído (FASE 1) / byte de clave (FASE 2)
+;   rbx  callee-saved  copia de key64 en FASE 2 (libera rdx si fuese necesario)
+;   r9   caller-saved  contador de bytes residuales en FASE 2
+;   r10  caller-saved  acumulador de desplazamiento en bits (0, 8, 16, …) en FASE 2
 ;
-; FASE 1 — Bloques completos de 8 bytes:
-;   • Bucle de (length / 8) iteraciones.
-;   • Cada iteración: MOV QWORD + XOR QWORD + MOV QWORD.
-;   • Se usan registros de 64 bits para máximo rendimiento.
+; NOTA DE ARQUITECTURA — por qué r9/r10 y no un solo rcx:
+;   SHR reg, cl requiere el conteo en CL. Si rcx actuara como contador de bytes
+;   residuales, no podría usarse simultáneamente como desplazamiento para SHR.
+;   La solución: r9 = contador de iteraciones, r10 = desplazamiento acumulado,
+;   y rcx se carga desde r10 justo antes de cada SHR.
 ;
-; FASE 2 — Bytes residuales (length % 8):
-;   • Bucle de 0 a 7 iteraciones.
-;   • El byte de clave para la posición i es (key >> (i*8)) & 0xFF.
+; INVARIANTE FASE 1 (al inicio de cada iteración del bloque):
+;   rdi apunta a buffer[8k], donde k es el número de bloques ya procesados.
+;   rcx es el número de bloques PENDIENTES.
+;   buffer[0..8k-1] ya ha sido correctamente cifrado.
 ;
-; Registros internos:
-;   rdi = cursor al buffer (avanza 8 bytes por bloque)
-;   rsi = bytes restantes (cuenta regresiva)
-;   rdx = clave de 64 bits (constante durante todo el bucle)
-;   rax = bloque de 8 bytes leído del buffer
-;   r8  = byte individual de clave extraído para residuos
-;   rcx = contador de bytes residuales
+; INVARIANTE FASE 2 (al inicio de cada iteración del residuo):
+;   rdi apunta a buffer[8q + j], donde q = ⌊length/8⌋ y j es el número de
+;   bytes residuales ya procesados.
+;   r9 es el número de bytes residuales PENDIENTES.
+;   r10 = j × 8 (desplazamiento para obtener K[j] de key64).
+;   buffer[0..8q+j-1] ya ha sido correctamente cifrado.
 cipher_xor:
     ; ── validaciones rápidas ─────────────────────────────────────────────────
     test rsi, rsi               ; length == 0?
