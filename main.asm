@@ -1,5 +1,7 @@
-; main.asm v4
-; Encrypt y Decrypt SEPARADOS - manejo correcto de cabecera.
+; main.asm v5
+; Encrypt y Decrypt con TRANSPOSE integrado.
+; Flujo encrypt: cipher_xor -> transpose_bytes
+; Flujo decrypt: transpose_bytes (undo) -> cipher_xor (undo)
 
 %include "include/syscalls.inc"
 %include "include/macros.inc"
@@ -8,6 +10,7 @@
 global _start
 extern sys_open, sys_read, sys_write, sys_close, sys_mmap, sys_munmap, sys_exit
 extern cipher_xor
+extern transpose_bytes
 extern frequency_clear, frequency_count, entropy_calculate
 extern header_build, header_checksum, header_validate
 
@@ -202,13 +205,18 @@ _start:
     lea rax, [rel entropy_before]
     fstp qword [rax]
     
-    ; ===== APLICAR CIFRADO =====
+    ; ===== APLICAR CIFRADO XOR =====
     
-    ; Llamar cipher_xor(buffer, length, key)
     mov rdi, [input_buffer]
     mov rsi, [input_size]
     mov rdx, r9
     call cipher_xor
+    
+    ; ===== APLICAR TRANSPOSICIÓN =====
+    
+    mov rdi, [input_buffer]
+    mov rsi, [input_size]
+    call transpose_bytes
     
     ; ===== CALCULAR ENTROPÍA DESPUÉS DEL CIFRADO =====
     
@@ -256,7 +264,7 @@ _start:
     mov rax, SYS_WRITE
     syscall
     
-    ; Escribir datos cifrados
+    ; Escribir datos cifrados + transpuestos
     mov rdi, r8
     mov rsi, [input_buffer]
     mov rdx, [input_size]
@@ -314,9 +322,16 @@ _start:
     lea rax, [rel entropy_before]
     fstp qword [rax]
     
-    ; ===== APLICAR DESCIFRADO =====
+    ; ===== DESHACER TRANSPOSICIÓN =====
+    ; (transpose es reversible: aplicar dos veces = original)
     
-    ; Llamar cipher_xor sobre los datos (después de cabecera)
+    mov rdi, [input_buffer]
+    add rdi, 20                 ; saltar cabecera
+    mov rsi, [data_size]
+    call transpose_bytes
+    
+    ; ===== APLICAR DESCIFRADO (cipher_xor es reversible) =====
+    
     mov rdi, [input_buffer]
     add rdi, 20                 ; saltar cabecera
     mov rsi, [data_size]
