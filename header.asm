@@ -9,7 +9,54 @@
 ; =============================================================================
 ;
 ; ==============================================================================
-; MÓDULO 1 — CHECKSUM ARITMÉTICO (suma de bytes mod 2³²)
+; MÓDULO 1 — CRC-32/ISO-HDLC (IEEE 802.3)
+; ==============================================================================
+;
+;   El CRC-32 (Cyclic Redundancy Check de 32 bits) es un código de detección
+;   de errores basado en la división polinomial en GF(2).
+;
+;   PARÁMETROS CRC-32/ISO-HDLC (estándar Ethernet, ZIP, PNG):
+;     Polinomio generador:  G(x) = x³²+x²⁶+x²³+x²²+x¹⁶+x¹²+x¹¹+x¹⁰+x⁸+x⁷+x⁵+x⁴+x²+x+1
+;     Representación normal:     0x04C11DB7
+;     Representación reflejada:  0xEDB88320  ← usada en la implementación
+;     Valor inicial (Init):      0xFFFFFFFF
+;     XOR final:                 0xFFFFFFFF
+;     Entrada reflejada (LSB-first): sí
+;     Salida reflejada: sí
+;     Valor de verificación:     header_crc32("123456789", 9) = 0xCBF43926
+;
+;   PROPIEDADES DE DETECCIÓN DE ERRORES:
+;     • Detecta todos los errores de 1 bit.
+;     • Detecta todos los errores de 2 bits en mensajes de longitud adecuada.
+;     • Detecta todos los errores de longitud ≤ 32 bits (burst errors).
+;     • Detecta ≈ 99.9999998% de errores mayores.
+;     (Superior a la suma aritmética, que no detecta permutaciones.)
+;
+;   ALGORITMO BIT A BIT (Galois LFSR, forma reflejada):
+;
+;     crc = 0xFFFFFFFF
+;     para cada byte b en el mensaje:
+;       crc = crc XOR b          (XOR en los 8 bits menos significativos)
+;       para i en 0..7:
+;         si (crc AND 1) == 1:
+;           crc = (crc >> 1) XOR 0xEDB88320
+;         si no:
+;           crc = crc >> 1
+;     retornar crc XOR 0xFFFFFFFF
+;
+;   DEMOSTRACIÓN: header_crc32("", 0) = 0x00000000
+;     Init = 0xFFFFFFFF, sin bytes procesados, XOR final: 0xFFFFFFFF XOR 0xFFFFFFFF = 0.  ✓
+;
+;   INVARIANTE DEL BUCLE EXTERNO (sobre bytes):
+;     Antes de procesar el byte en posición i (0 ≤ i ≤ n):
+;       eax = CRC parcial de los primeros i bytes del mensaje.
+;     Base:  i=0 → eax = 0xFFFFFFFF (init).  ✓
+;     Paso:  tras procesar byte i, eax = CRC parcial de los primeros i+1 bytes.
+;     Fin:   i=n → eax = CRC(buf[0..n-1]).
+;     XOR final: eax = eax XOR 0xFFFFFFFF → CRC-32 completo.  ✓
+;
+; ==============================================================================
+; MÓDULO 2 — CHECKSUM ARITMÉTICO (suma de bytes mod 2³²)
 ; ==============================================================================
 ;
 ;   Definición:
@@ -76,6 +123,7 @@
 global header_build
 global header_validate
 global header_checksum
+global header_crc32
 
 ; =============================================================================
 section .text
@@ -189,4 +237,72 @@ header_validate:
 
 .hv_invalid:
     xor  eax, eax               ; cabecera inválida → retornar 0
+    ret
+
+; =============================================================================
+; header_crc32 — CRC-32/ISO-HDLC (IEEE 802.3, Ethernet, ZIP, PNG)
+; =============================================================================
+; uint32_t header_crc32(const uint8_t *buffer, uint64_t length)
+;   rdi = puntero al buffer
+;   rsi = longitud en bytes
+;   rax = CRC-32 de 32 bits
+;
+; Parámetros del algoritmo:
+;   Polinomio reflejado: 0xEDB88320  (= bit-reversal de 0x04C11DB7)
+;   Init:    0xFFFFFFFF
+;   XOR final: 0xFFFFFFFF
+;   Check:   header_crc32("123456789", 9) = 0xCBF43926
+;
+; Precondición:  rsi ≥ 0. Si rsi = 0 retorna 0x00000000 (0xFFFFFFFF XOR 0xFFFFFFFF).
+;
+; Postcondición: rax = CRC-32(buf[0..rsi−1]) según CRC-32/ISO-HDLC.
+;
+; Complejidad: O(n×8) = O(n). Implementación bit a bit (sin tabla de 1 KB).
+;
+; Registros:
+;   rbx = buffer base              (callee-saved → push/pop)
+;   r12 = length                   (callee-saved → push/pop)
+;   eax = CRC acumulador           (retorno)
+;   rcx = índice de byte           (caller-saved)
+;   edx = byte actual (zero-ext)   (caller-saved)
+;   r9d = contador de bits (0..7)  (caller-saved)
+header_crc32:
+    push rbx                    ; preservar callee-saved (ABI)
+    push r12
+
+    mov  rbx, rdi               ; rbx = buffer base
+    mov  r12, rsi               ; r12 = length
+
+    mov  eax, 0xFFFFFFFF        ; eax = CRC = Init  [Inv(0)]
+    xor  rcx, rcx               ; rcx = índice de byte = 0
+
+.crc_byte_loop:
+    cmp  rcx, r12               ; ¿procesamos todos los bytes?
+    je   .crc_finalize
+
+    movzx edx, byte [rbx + rcx] ; edx = buf[i] (zero-extended)
+    xor  al, dl                 ; XOR byte en los 8 LSB del CRC
+
+    ; ── procesar 8 bits (Galois LFSR, LSB-first) ─────────────────────────────
+    mov  r9d, 8
+.crc_bit_loop:
+    test eax, 1                 ; ¿bit menos significativo = 1?
+    jz   .crc_no_poly
+    shr  eax, 1                 ; desplazar a la derecha 1 bit
+    xor  eax, 0xEDB88320        ; XOR con polinomio reflejado
+    jmp  .crc_bit_done
+.crc_no_poly:
+    shr  eax, 1                 ; sólo desplazar (sin XOR)
+.crc_bit_done:
+    dec  r9d
+    jnz  .crc_bit_loop          ; repetir 8 veces
+
+    inc  rcx
+    jmp  .crc_byte_loop         ; [Inv(i+1): eax = CRC parcial de buf[0..i]]
+
+.crc_finalize:
+    xor  eax, 0xFFFFFFFF        ; XOR final: complemento del CRC acumulado
+
+    pop  r12                    ; restaurar callee-saved (ABI)
+    pop  rbx
     ret

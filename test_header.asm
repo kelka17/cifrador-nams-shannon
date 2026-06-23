@@ -59,7 +59,7 @@ global _start
 
 extern sys_exit
 extern io_print_string, io_print_newline, io_print_hex64, io_print_uint64
-extern header_build, header_validate, header_checksum
+extern header_build, header_validate, header_checksum, header_crc32
 extern cipher_build_key64, cipher_xor
 extern transpose_encrypt, transpose_decrypt
 
@@ -78,9 +78,8 @@ section .rodata
     ; ── cabeceras de sección ─────────────────────────────────────────────────
     hdr_build    db "=== TEST 1: header_build — construir cabecera CRYP ===", 0
     hdr_valid    db "=== TEST 2: header_validate — verificar magic number ===", 0
-    hdr_crc_0    db "=== TEST 3: header_crc32('', 0) — buffer vacio ===", 0
-    hdr_crc_std  db "=== TEST 4: header_crc32('123456789', 9) — vector estandar ===", 0
-    hdr_macro    db "=== TEST 5: CIFRAR_COMPLETO / DESCIFRAR_COMPLETO round-trip ===", 0
+    hdr_crc_0    db "=== TEST 3: header_crc32('', 0) — CRC-32 buffer vacio ===", 0
+    hdr_crc_std  db "=== TEST 4: header_crc32('123456789',9) — vector estandar ISO-HDLC ===", 0
     hdr_done     db "=== TODOS LOS TESTS PASARON ===", 0
 
     ; ── etiquetas de items ───────────────────────────────────────────────────
@@ -274,6 +273,64 @@ _start:
     mov  rdi, rax
     call io_print_uint64
     ASSERT_EQ32 r13d, 0
+
+; =============================================================================
+; TEST 3 — header_crc32("", 0): CRC-32 del buffer vacío = 0x00000000
+; =============================================================================
+    SECTION_HDR hdr_crc_0
+
+    ; CRC-32("") = Init XOR Final = 0xFFFFFFFF XOR 0xFFFFFFFF = 0x00000000
+    lea  rdi, [rel crc_empty_str]
+    mov  rsi, 0
+    call header_crc32           ; eax = CRC-32
+
+    mov  r13d, eax              ; r13d = resultado (callee-saved sobrevive prints)
+
+    mov  rdi, lbl_crc_got
+    call io_print_string
+    mov  edi, r13d              ; zero-extend a rdi
+    call io_print_hex64
+    call io_print_newline
+
+    mov  rdi, lbl_crc_exp
+    call io_print_string
+    mov  rdi, 0
+    call io_print_hex64
+    call io_print_newline
+
+    mov  rdi, lbl_crc_cmp
+    call io_print_string
+    ASSERT_EQ32 r13d, 0x00000000
+
+; =============================================================================
+; TEST 4 — header_crc32("123456789", 9): vector estándar CRC-32/ISO-HDLC
+; =============================================================================
+    SECTION_HDR hdr_crc_std
+
+    ; Vector de verificación de la especificación CRC-32/ISO-HDLC:
+    ;   CRC-32("123456789") = 0xCBF43926
+    ; Si este test pasa, la implementación es correcta para el estándar.
+    lea  rdi, [rel crc_std_str]
+    mov  rsi, 9
+    call header_crc32           ; eax = CRC-32
+
+    mov  r13d, eax
+
+    mov  rdi, lbl_crc_got
+    call io_print_string
+    mov  edi, r13d
+    call io_print_hex64
+    call io_print_newline
+
+    mov  rdi, lbl_crc_exp
+    call io_print_string
+    mov  rdi, 0xCBF43926
+    call io_print_hex64
+    call io_print_newline
+
+    mov  rdi, lbl_crc_cmp
+    call io_print_string
+    ASSERT_EQ32 r13d, 0xCBF43926
 
 ; =============================================================================
 ; FIN
