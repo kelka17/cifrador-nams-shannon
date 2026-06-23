@@ -54,8 +54,10 @@ section .rodata
     msg_fail     db " [FAIL]", 10, 0
 
     hdr_build    db "=== TEST 1: cipher_build_key64 ===", 0
-    hdr_xor      db "=== TEST 2: cipher_xor (cifrado, 1 bloque) ===", 0
+    hdr_xor      db "=== TEST 2: cipher_xor (cifrado, 1 bloque exacto) ===", 0
     hdr_decrypt  db "=== TEST 3: cipher_xor (descifrado = misma operacion XOR) ===", 0
+    hdr_resid7   db "=== TEST 4: residuos — 7 bytes (sin bloque completo) ===", 0
+    hdr_resid9   db "=== TEST 5: residuos — 9 bytes (1 bloque + 1 byte residual) ===", 0
     hdr_done     db "=== TODOS LOS TESTS PASARON ===", 0
 
     lbl_key_exp  db "  esperada -> ", 0
@@ -69,6 +71,16 @@ section .rodata
     lbl_dc_got   db "  descifrado  ", 0
     lbl_dc_exp   db "  esperado -> ", 0
     lbl_dc_cmp   db "  resultado   ", 0
+
+    ; TEST 4 / TEST 5
+    lbl_byte_pfx db "  byte[", 0
+    lbl_byte_sep db "] = ", 0
+    lbl_byte_exp db "  exp= 0x", 0
+    lbl_r7_info  db "  'ABCDEFG' (7 bytes) XOR 'KEY12345' byte a byte:", 0
+    lbl_r9_info  db "  'ABCDEFGHI' (9 bytes): bloque[0..7] ok, residuo:", 0
+
+    ; plaintext de 9 bytes para TEST 5 (necesita null extra para no pisar memoria)
+    plaintext9   db "ABCDEFGHI", 0
 
     key_str      db "KEY12345", 0   ; null-terminated
     plaintext    db "ABCDEFGH"      ; 8 bytes exactos, SIN null
@@ -116,6 +128,21 @@ section .rodata
     je   %%pass
     FAIL_MSG
     jmp  %%end
+%%pass:
+    OK_MSG
+%%end:
+%endmacro
+
+; ASSERT_BYTE base_reg, byte_offset, expected_byte
+;   Carga un byte desde [base_reg + byte_offset] y lo compara con expected_byte.
+;   Imprime OK o FAIL. Destruye rax, rdi (caller-saved).
+;   base_reg debe ser callee-saved (rbx, r12…) para sobrevivir los prints.
+%macro ASSERT_BYTE 3
+    movzx rax, byte [%1 + %2]  ; leer byte en cuestión (zero-extend)
+    cmp   al, %3
+    je    %%pass
+    FAIL_MSG
+    jmp   %%end
 %%pass:
     OK_MSG
 %%end:
@@ -260,6 +287,105 @@ _start:
     ; ── liberar buffer ────────────────────────────────────────────────────────
     mov  rdi, rbx
     mov  rsi, 8
+    call io_free
+
+; =============================================================================
+; TEST 4 — Residuos puros: 7 bytes (q=0 bloques, r=7 residuos)
+;
+;   La FASE 1 de cipher_xor se salta (rcx = 7>>3 = 0 → jz .cx_residual).
+;   Los 7 bytes se procesan enteramente en la FASE 2, byte a byte.
+;
+;   Plaintext "ABCDEFG" (7 bytes):
+;     [0]=0x41^0x4B=0x0A  [1]=0x42^0x45=0x07  [2]=0x43^0x59=0x1A
+;     [3]=0x44^0x31=0x75  [4]=0x45^0x32=0x77  [5]=0x46^0x33=0x75
+;     [6]=0x47^0x34=0x73
+;   byte[7] NO se toca (solo se cifran 7 bytes, no 8).
+; =============================================================================
+    SECTION_HDR hdr_resid7
+
+    mov  rdi, lbl_r7_info
+    call io_print_string
+    call io_print_newline
+
+    ; ── asignar 8 bytes, copiar "ABCDEFG" + centinela en [7] ────────────────
+    mov  rdi, 8
+    call io_alloc
+    mov  rbx, rax                   ; rbx = buf_ptr (callee-saved)
+
+    mov  rax, qword [rel plaintext] ; "ABCDEFGH" como qword (solo usamos primeros 7)
+    mov  qword [rbx], rax
+    mov  byte [rbx + 7], 0xFF       ; centinela: byte[7] NO debe ser modificado
+
+    ; ── cifrar solo 7 bytes ───────────────────────────────────────────────────
+    mov  rdi, rbx
+    mov  rsi, 7                     ; length = 7  → q=0 bloques, r=7 residuos
+    mov  rdx, r12                   ; key64 (r12 callee-saved, aún válido)
+    call cipher_xor
+
+    ; ── verificar los 7 bytes cifrados ────────────────────────────────────────
+    mov  rdi, lbl_byte_pfx
+    call io_print_string
+    mov  rdi, lbl_byte_sep
+    call io_print_string            ; imprime: "byte[" + "] = "  (lazy display)
+
+    ; Comprobaciones individuales (ASSERT_BYTE preserva rbx)
+    ASSERT_BYTE rbx, 0, 0x0A        ; A ^ K
+    ASSERT_BYTE rbx, 1, 0x07        ; B ^ E
+    ASSERT_BYTE rbx, 2, 0x1A        ; C ^ Y
+    ASSERT_BYTE rbx, 3, 0x75        ; D ^ 1
+    ASSERT_BYTE rbx, 4, 0x77        ; E ^ 2
+    ASSERT_BYTE rbx, 5, 0x75        ; F ^ 3
+    ASSERT_BYTE rbx, 6, 0x73        ; G ^ 4
+    ; byte[7] debe seguir siendo 0xFF (no fue cifrado)
+    ASSERT_BYTE rbx, 7, 0xFF        ; centinela intacto
+
+    ; ── liberar buffer ────────────────────────────────────────────────────────
+    mov  rdi, rbx
+    mov  rsi, 8
+    call io_free
+
+; =============================================================================
+; TEST 5 — Bloque + residuo: 9 bytes (q=1 bloque, r=1 byte residual)
+;
+;   FASE 1: procesa bytes[0..7] como un QWORD (resultado = TEST 2).
+;   FASE 2: procesa byte[8] con K[8 mod 8] = K[0] = 'K' = 0x4B.
+;     byte[8] = 'I' = 0x49  →  0x49 ⊕ 0x4B = 0x02
+;
+;   Esta prueba verifica que al terminar la FASE 1, el puntero rdi apunta
+;   correctamente al primer byte residual y que r10 se inicializa en 0
+;   (el residual empieza desde K[0], no continúa desde K[8 mod 8]).
+; =============================================================================
+    SECTION_HDR hdr_resid9
+
+    mov  rdi, lbl_r9_info
+    call io_print_string
+    call io_print_newline
+
+    ; ── asignar 16 bytes y copiar "ABCDEFGHI" ─────────────────────────────────
+    mov  rdi, 16
+    call io_alloc
+    mov  rbx, rax                   ; rbx = buf_ptr (callee-saved)
+
+    mov  rax, qword [rel plaintext] ; "ABCDEFGH"
+    mov  qword [rbx], rax
+    mov  al,  byte [rel plaintext9 + 8] ; 'I' = 0x49
+    mov  byte [rbx + 8], al
+    mov  byte [rbx + 9], 0xFF       ; centinela: byte[9] no se debe tocar
+
+    ; ── cifrar 9 bytes ────────────────────────────────────────────────────────
+    mov  rdi, rbx
+    mov  rsi, 9                     ; length = 9  → q=1 bloque, r=1 residuo
+    mov  rdx, r12                   ; key64
+    call cipher_xor
+
+    ; ── verificar el byte residual ────────────────────────────────────────────
+    ; (los bytes [0..7] del bloque se verificaron en TEST 2 con los mismos datos)
+    ASSERT_BYTE rbx, 8, 0x02        ; 'I'=0x49 ^ K[0]='K'=0x4B = 0x02
+    ASSERT_BYTE rbx, 9, 0xFF        ; centinela intacto
+
+    ; ── liberar buffer ────────────────────────────────────────────────────────
+    mov  rdi, rbx
+    mov  rsi, 16
     call io_free
 
 ; =============================================================================
