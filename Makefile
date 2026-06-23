@@ -27,5 +27,11 @@ test_entropy: test_entropy.o entropy.o io.o display.o
 test_entropy.o: test_entropy.asm include/syscalls.inc
 	$(NASM) $(NASMFLAGS) -o $@ $<
 
+test_header: test_header.o header.o io.o cipher.o transpose.o
+	$(LD) -o $@ $^
+
+test_header.o: test_header.asm include/syscalls.inc include/header.inc
+	$(NASM) $(NASMFLAGS) -o $@ $<
+
 clean:
-	rm -f $(OBJ) $(TARGET) test_entropy test_entropy.o
+	rm -f $(OBJ) $(TARGET) test_entropy test_entropy.o test_header test_header.o
