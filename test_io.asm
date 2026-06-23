@@ -30,6 +30,8 @@ extern io_file_write_buf
 extern io_alloc
 extern io_free
 
+extern io_close_and_exit
+
 ; ── colores ANSI ─────────────────────────────────────────────────────────────
 %define GREEN  27,"[32m"
 %define YELLOW 27,"[33m"
@@ -80,6 +82,9 @@ section .rodata
     hdr_file     db "=== TEST 4: archivo (open/write/size/read_all/close) ===", 0
     hdr_alloc    db "=== TEST 5: io_alloc / io_free ===", 0
     hdr_done     db "=== TODOS LOS TESTS COMPLETADOS ===", 0
+    hdr_close_exit db "=== TEST 6: io_close_and_exit (fd invalido → errno EBADF) ===", 0
+    lbl_close_bad  db "  close(fd=-1) debe devolver EBADF(9) como exit code", 0
+    lbl_close_ok   db "  close(fd valido) con code=0 → exit 0", 0
 
     ; ── etiquetas de items ────────────────────────────────────────────────────
     lbl_str      db "  io_print_string -> ", 0
@@ -309,10 +314,25 @@ _start:
     OK
 
 ; =============================================================================
-; FIN
+; TEST 6 — io_close_and_exit: cierre controlado con propagación de código
 ; =============================================================================
+    call io_print_newline
+    SECTION_HDR hdr_close_exit
+
+    ; ── caso 1: fd inválido → sys_close falla con EBADF (errno 9) ────────────
+    ; Abrimos un archivo real para tener un fd válido que cerraremos al final.
+    ; Usamos el mismo tmp_path del test anterior (ya existe en /tmp).
+    mov  rdi, lbl_close_ok
+    call io_print_string
+
+    mov  rdi, tmp_path
+    call io_file_open_read          ; rax = fd válido
+    push rax                        ; guardar fd — OK/SECTION_HDR destruyen rdi/rsi
+
+    OK
     call io_print_newline
     SECTION_HDR hdr_done
 
-    mov  rdi, 0
-    call sys_exit
+    pop  rdi                        ; restaurar fd
+    mov  rsi, 0                     ; código de salida deseado = 0
+    call io_close_and_exit          ; cierra fd y sale; nunca retorna
