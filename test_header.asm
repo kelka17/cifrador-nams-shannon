@@ -54,6 +54,7 @@
 
 %include "include/syscalls.inc"
 %include "include/header.inc"
+%include "include/macros.inc"
 
 global _start
 
@@ -80,6 +81,7 @@ section .rodata
     hdr_valid    db "=== TEST 2: header_validate — verificar magic number ===", 0
     hdr_crc_0    db "=== TEST 3: header_crc32('', 0) — CRC-32 buffer vacio ===", 0
     hdr_crc_std  db "=== TEST 4: header_crc32('123456789',9) — vector estandar ISO-HDLC ===", 0
+    hdr_macro    db "=== TEST 5: CIFRAR_COMPLETO / DESCIFRAR_COMPLETO — round-trip ===", 0
     hdr_done     db "=== TODOS LOS TESTS PASARON ===", 0
 
     ; ── etiquetas de items ───────────────────────────────────────────────────
@@ -100,12 +102,14 @@ section .rodata
     lbl_buf_enc  db "  buf cifrado-> ", 0
     lbl_buf_aft  db "  buf despues-> ", 0
     lbl_rt_cmp   db "  round-trip   ", 0
+    lbl_macro_bef db "  buf antes  -> ", 0
+    lbl_macro_enc db "  buf cifrado-> ", 0
+    lbl_macro_aft db "  buf despues-> ", 0
 
     ; ── datos de prueba ──────────────────────────────────────────────────────
     crc_empty_str  db 0             ; buffer de 0 bytes (placeholder)
     crc_std_str    db "123456789"   ; 9 bytes — vector estándar CRC-32
-    plaintext_AB   db "ABCDEFGH"   ; 8 bytes para TEST 5
-    key_str        db "KEY12345", 0 ; clave null-terminated
+    key_str        db "KEY12345", 0 ; clave null-terminated para TEST 5
 
 ; =============================================================================
 ; MACROS
@@ -169,7 +173,8 @@ section .rodata
 section .bss
 ; =============================================================================
 
-    hdr_buf  resb 20            ; buffer de 20 bytes para la cabecera CRYP
+    hdr_buf   resb 20           ; buffer de 20 bytes para la cabecera CRYP
+    macro_buf resb 8            ; buffer de 8 bytes para TEST 5 (round-trip macro)
 
 ; =============================================================================
 section .text
@@ -331,6 +336,50 @@ _start:
     mov  rdi, lbl_crc_cmp
     call io_print_string
     ASSERT_EQ32 r13d, 0xCBF43926
+
+; =============================================================================
+; TEST 5 — CIFRAR_COMPLETO / DESCIFRAR_COMPLETO: round-trip "ABCDEFGH"
+; =============================================================================
+    SECTION_HDR hdr_macro
+
+    ; copiar "ABCDEFGH" (qword LE = 0x4847464544434241) a macro_buf
+    ; "ABCDEFGH" en memoria: 41 42 43 44 45 46 47 48 → qword LE = 0x4847464544434241
+    ; NOTA: x86-64 no permite MOV qword [mem], imm64 directamente →
+    ;       hay que pasar por un registro de 64 bits primero.
+    lea  rbx, [rel macro_buf]
+    mov  rax, 0x4847464544434241           ; cargar imm64 en registro
+    mov  qword [rbx], rax                  ; plaintext = "ABCDEFGH"
+
+    mov  rdi, lbl_macro_bef
+    call io_print_string
+    mov  rdi, qword [rbx]       ; leer qword actual
+    call io_print_hex64
+    call io_print_newline
+
+    ; cifrar: XOR("ABCDEFGH", key) → BSWAP(result)
+    ; rbx = macro_buf (callee-saved; sobrevive a CIFRAR_COMPLETO)
+    CIFRAR_COMPLETO rbx, 8, key_str
+
+    mov  rdi, lbl_macro_enc
+    call io_print_string
+    mov  rdi, qword [rbx]       ; buffer cifrado
+    call io_print_hex64
+    call io_print_newline
+
+    ; descifrar: BSWAP(ciphertext) → XOR(result, key)
+    DESCIFRAR_COMPLETO rbx, 8, key_str
+
+    mov  rdi, lbl_macro_aft
+    call io_print_string
+    mov  r12, qword [rbx]       ; buf después del round-trip
+    mov  rdi, r12
+    call io_print_hex64
+    call io_print_newline
+
+    ; verificar round-trip: buf debe ser "ABCDEFGH" = 0x4847464544434241
+    mov  rdi, lbl_rt_cmp
+    call io_print_string
+    ASSERT_EQ64 r12, 0x4847464544434241
 
 ; =============================================================================
 ; FIN
