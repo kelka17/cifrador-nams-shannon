@@ -64,6 +64,15 @@
 ;     FCHS  → ST0=+1/32
 ;   H = 256 × (1/32) = 8.0 bits/byte (máximo posible) → millis = 8000
 ;
+; ── TEST 7 — display_entropy_panel comparativo ───────────────────────────────
+;   Objetivo: verificar visualmente la comparación antes/después del cifrado.
+;   Datos:
+;     h_antes   = buffer mono-símbolo  [A,A,A,A] → H = 0.000 bits/byte (millis=0)
+;     h_después = distribución uniforme de 256   → H = 8.000 bits/byte (millis=8000)
+;   Interpretación: el cifrado ideal eleva la entropía de 0 a 8 bits/byte,
+;   demostrando máxima difusión.  La función display_entropy_panel imprime
+;   ambos valores en formato "X.YYY bits/byte" con el panel comparativo.
+;
 ; =============================================================================
 
 %include "include/syscalls.inc"
@@ -74,6 +83,7 @@ extern sys_exit
 extern io_print_string, io_print_newline, io_print_uint64
 extern frequency_clear, frequency_count, entropy_calculate
 extern frequency_table
+extern display_entropy_panel
 
 ; =============================================================================
 section .rodata
@@ -94,6 +104,7 @@ section .rodata
     hdr_h1       db "=== TEST 4: entropy_calculate — H = 1.000 bits/byte (dos simbolos p=1/2) ===", 0
     hdr_h3       db "=== TEST 5: entropy_calculate — H = 3.000 bits/byte (8 simbolos p=1/8) ===", 0
     hdr_h8       db "=== TEST 6: entropy_calculate — H = 8.000 bits/byte (256 simbolos, maximo) ===", 0
+    hdr_panel    db "=== TEST 7: display_entropy_panel — comparativo antes/despues cifrado ===", 0
     hdr_done     db "=== TODOS LOS TESTS PASARON ===", 0
 
     ; ── etiquetas de items ───────────────────────────────────────────────────
@@ -107,6 +118,7 @@ section .rodata
     lbl_milli    db "  H x1000 = ", 0
     lbl_exp      db "  esperado = ", 0
     lbl_cmp      db "  resultado   ", 0
+    lbl_panel    db "  panel visual (H_antes=0.000 vs H_despues=8.000 bits/byte):", 10, 0
 
     ; ── datos de prueba ──────────────────────────────────────────────────────
     buf_AABBC    db 0x41, 0x41, 0x42, 0x42, 0x43   ; "AABBC" — 5 bytes
@@ -390,6 +402,24 @@ _start:
     mov  rdi, lbl_cmp
     call io_print_string
     ASSERT_EQ64 r12, 8000
+
+; =============================================================================
+; TEST 7 — display_entropy_panel: salida comparativa antes/después del cifrado
+; =============================================================================
+    SECTION_HDR hdr_panel
+
+    ; Datos: h_antes = 0 millis (buffer mono-símbolo, H=0)
+    ;        h_después = 8000 millis (distribución uniforme, H=8 máximo)
+    ; La función muestra ambos valores en formato "X.YYY bits/byte".
+    ; Interpreta: cifrado eleva entropía de 0.000 a 8.000 bits/byte.
+    mov  rdi, lbl_panel
+    call io_print_string
+
+    mov  rdi, 0                  ; h_antes   = 0 millis
+    mov  rsi, 8000               ; h_después = 8000 millis
+    call display_entropy_panel
+    call io_print_newline
+    OK_MSG                       ; panel dibujado correctamente → PASS
 
 ; =============================================================================
 ; FIN
