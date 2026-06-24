@@ -1,6 +1,11 @@
 ; =============================================================================
-; io.asm — Módulo de Entrada/Salida y Manejo de Archivos
-; Proyecto: Cifrador/Descifrador con Análisis de Entropía de Shannon
+; Archivo:     io.asm
+; Proyecto:    Cifrador/Descifrador con Análisis de Entropía de Shannon
+; Asignatura:  Taller de Programación en Bajo Nivel
+; Universidad: UMSS — Facultad de Ciencias y Tecnología
+; Autor(es):   [Nombre Apellido]
+; Fecha:       [DD/MM/AAAA]
+; Descripción: Wrappers de syscalls Linux x86-64 y utilidades de E/S sin libc.
 ; =============================================================================
 ;
 ; Responsabilidad:
@@ -83,6 +88,8 @@ global io_file_write_buf
 
 global io_alloc
 global io_free
+
+global io_close_and_exit
 
 ; =============================================================================
 section .data
@@ -510,10 +517,10 @@ io_file_size:
 ; Para liberar: io_free(ptr, size).
 ;
 ; syscall mmap(2):
-;   addr   = NULL         → el kernel elige la dirección
-;   len    = size         → tamaño total
-;   prot   = PROT_READ(1) → solo lectura sobre el mapeo de archivo
-;   flags  = MAP_PRIVATE(2) → copia privada; escrituras no afectan el archivo
+;   addr   = NULL                      → el kernel elige la dirección
+;   len    = size                      → tamaño total
+;   prot   = PROT_READ|PROT_WRITE (3) → lectura/escritura (cifrado in-place)
+;   flags  = MAP_PRIVATE(2)            → copia privada; escrituras no afectan el archivo en disco
 ;   fd     = fd
 ;   offset = 0            → desde el inicio del archivo
 ;
@@ -528,8 +535,8 @@ io_file_read_all:
 
     xor  rdi, rdi               ; addr   = NULL
     mov  rsi, r13               ; len    = size
-    mov  rdx, PROT_READ         ; prot   = solo lectura
-    mov  r10, MAP_PRIVATE       ; flags  = copia privada (r10 para syscall)
+    mov  rdx, PROT_READ | PROT_WRITE ; prot = lectura/escritura (cifrado in-place)
+    mov  r10, MAP_PRIVATE            ; flags = copia privada; escrituras no tocan el archivo (r10 para syscall)
     mov  r8,  r12               ; fd
     xor  r9,  r9                ; offset = 0
     mov  rax, SYS_MMAP
@@ -572,6 +579,43 @@ io_free:
     mov  rax, SYS_MUNMAP
     syscall
     ret
+
+; ─── io_close_and_exit ───────────────────────────────────────────────────────
+; [noreturn] void io_close_and_exit(int fd, int code)
+;   rdi = descriptor a cerrar
+;   rsi = código de salida deseado (0 = éxito, ≠0 = error de la aplicación)
+;
+; Comportamiento:
+;   1. Llama sys_close(fd).
+;   2. Si sys_close tiene éxito (rax == 0), sale con el código recibido en rsi.
+;   3. Si sys_close falla  (rax <  0), sale con -rax (errno positivo) para
+;      que el shell pueda detectar la causa del fallo: "exit $?"
+;
+; Convención de códigos usada en el proyecto:
+;   0          — éxito
+;   1..127     — errores de la aplicación (definidos por el caller)
+;   errno > 0  — error del kernel en sys_close (EBADF=9, EIO=5, etc.)
+;
+; Esta función nunca retorna al caller.
+io_close_and_exit:
+    push rsi                        ; preservar código de salida deseado
+
+    ; sys_close(fd) — rdi ya contiene el fd
+    mov  rax, SYS_CLOSE
+    syscall                         ; rax = 0 éxito | -errno en error
+
+    pop  rdi                        ; rdi = código de salida deseado
+
+    test rax, rax
+    jns  .cae_exit                  ; rax >= 0: close OK → usar código original
+
+    neg  rax                        ; rax = errno positivo (p.ej. EBADF=9)
+    mov  rdi, rax                   ; código de salida = errno del fallo
+
+.cae_exit:
+    mov  rax, SYS_EXIT
+    syscall
+    ; zona muerta: el kernel terminó el proceso
 
 ; ─── io_file_write_buf ───────────────────────────────────────────────────────
 ; ssize_t io_file_write_buf(int fd, const void *buf, uint64_t len)
