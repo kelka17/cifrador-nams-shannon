@@ -3,8 +3,6 @@
 ; Proyecto:    Cifrador/Descifrador con Análisis de Entropía de Shannon
 ; Asignatura:  Taller de Programación en Bajo Nivel
 ; Universidad: UMSS — Facultad de Ciencias y Tecnología
-; Autor(es):   [Nombre Apellido]
-; Fecha:       [DD/MM/AAAA]
 ; Descripción: Punto de entrada. Orquesta CLI, I/O, cifrado y visualización.
 ; =============================================================================
 ;

@@ -2,9 +2,6 @@
 ; Archivo:     display.asm
 ; Proyecto:    Cifrador/Descifrador con Análisis de Entropía de Shannon
 ; Asignatura:  Taller de Programación en Bajo Nivel
-; Universidad: UMSS — Facultad de Ciencias y Tecnología
-; Autor(es):   [Nombre Apellido]
-; Fecha:       [DD/MM/AAAA]
 ; Descripción: Histograma ASCII con colores ANSI y panel de entropía Shannon.
 ; =============================================================================
 

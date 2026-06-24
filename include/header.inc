@@ -3,7 +3,6 @@
 ; Proyecto:    Cifrador/Descifrador con Análisis de Entropía de Shannon
 ; Asignatura:  Taller de Programación en Bajo Nivel
 ; Universidad: UMSS — Facultad de Ciencias y Tecnología
-; Descripción: Definición binaria de la cabecera personalizada CRYP (20 bytes).
 ; =============================================================================
 ;
 ; ==============================================================================

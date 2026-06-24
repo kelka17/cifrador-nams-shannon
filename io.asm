@@ -3,8 +3,6 @@
 ; Proyecto:    Cifrador/Descifrador con Análisis de Entropía de Shannon
 ; Asignatura:  Taller de Programación en Bajo Nivel
 ; Universidad: UMSS — Facultad de Ciencias y Tecnología
-; Autor(es):   [Nombre Apellido]
-; Fecha:       [DD/MM/AAAA]
 ; Descripción: Wrappers de syscalls Linux x86-64 y utilidades de E/S sin libc.
 ; =============================================================================
 ;
