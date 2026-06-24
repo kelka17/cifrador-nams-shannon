@@ -12,6 +12,13 @@
 %define SYS_MMAP    9
 %define SYS_MUNMAP  11
 %define SYS_EXIT    60
+%define SYS_IOCTL   16
+
+%define TCGETS      0x5401
+%define TCSETS      0x5402
+%define ECHO_BIT    0x0008
+%define LFLAG_OFF   12
+%define TERMIOS_SZ  36
 
 %define STDIN       0
 %define STDOUT      1

@@ -54,6 +54,8 @@ extern header_build, header_validate, header_checksum
 extern display_histogram, display_entropy_panel
 extern report_generate
 extern log_append
+extern menu_display_main, menu_read_choice, menu_get_password, menu_display_info
+extern io_read_line, io_set_no_echo, io_set_echo
 
 ; =============================================================================
 section .rodata
@@ -87,6 +89,13 @@ section .rodata
     report_fname   db "reporte.html", 0
     msg_report     db "  Reporte HTML: reporte.html", 10, 0
 
+    ; ── prompts del menú interactivo ─────────────────────────────────────────
+    menu_prompt_input  db "  Archivo de entrada : ", 0
+    menu_prompt_output db "  Archivo de salida  : ", 0
+    menu_prompt_pass   db "  Contrasena         : ", 0
+    msg_analyzing      db "  Analizando...", 10, 0
+    msg_analysis_done  db "  Analisis completado.", 10, 0
+
 ; =============================================================================
 section .data
 ; =============================================================================
@@ -111,6 +120,10 @@ section .bss
     fd_report            resq 1  ; descriptor del archivo HTML de reporte
     input_fname_ptr      resq 1  ; puntero al nombre del archivo de entrada
     exit_code            resb 1  ; 0=éxito, 1=error (BSS default=0)
+    menu_active          resb 1  ; 1=modo menú interactivo, 0=modo CLI
+    menu_buf_in          resb 256 ; ruta de archivo de entrada (modo menú)
+    menu_buf_out         resb 256 ; ruta de archivo de salida (modo menú)
+    menu_buf_pass        resb 128 ; contraseña (modo menú)
 
 ; =============================================================================
 section .text
@@ -127,9 +140,11 @@ _start:
 
     ; ── validar argc == 5 ─────────────────────────────────────────────────────
     ; [rsp+0] = argc. No se han hecho pushes, offset directo.
-    mov  rax, [rsp]             ; rax = argc (en _start: pila sin frame)
-    cmp  rax, 5                 ; ./cifrador modo entrada salida clave = 5 tokens
+    mov  rax, [rsp]             ; rax = argc
+    cmp  rax, 5                 ; modo CLI: ./cifrador modo entrada salida clave
     je   .args_ok
+    cmp  rax, 1                 ; modo menú: ./cifrador  (sin argumentos)
+    je   .menu_start
 
     lea  rdi, [rel usage]
     call io_print_string
@@ -205,7 +220,10 @@ _start:
     ja   .err_mmap
     mov  [rel buf_ptr], rax
 
-    ; ── abrir archivo de salida ───────────────────────────────────────────────
+    ; ── abrir archivo de salida (solo para cifrado/descifrado, no para análisis)
+    cmp  byte [rel mode], 2
+    je   .dispatch_mode         ; modo análisis: no necesita archivo de salida
+
     mov  rdi, r14               ; r14 = ruta del archivo de salida
     call io_file_open_write     ; rax = fd o negativo
     test rax, rax
@@ -213,9 +231,12 @@ _start:
     mov  [rel fd_out], rax
 
     ; ── despachar al flujo correspondiente ────────────────────────────────────
+.dispatch_mode:
     cmp  byte [rel mode], 0
     je   .do_encrypt
-    jmp  .do_decrypt
+    cmp  byte [rel mode], 1
+    je   .do_decrypt
+    jmp  .do_analyze
 
 ; =============================================================================
 ; FLUJO DE CIFRADO (encrypt)
@@ -348,6 +369,41 @@ _start:
     jmp  .display
 
 ; =============================================================================
+; FLUJO DE ANÁLISIS DE ENTROPÍA (modo=2, sin cifrado ni archivo de salida)
+; =============================================================================
+.do_analyze:
+    lea  rdi, [rel msg_analyzing]
+    call io_print_string
+
+    call frequency_clear
+    mov  rdi, [rel buf_ptr]
+    mov  rsi, [rel file_size]
+    call frequency_count
+
+    mov  rdi, [rel file_size]
+    call entropy_calculate
+    call fpu_st0_to_milli
+    mov  [rel entropy_before_milli], rax
+    mov  [rel entropy_after_milli],  rax   ; sin cifrado: antes == después
+
+    mov  rax, [rel file_size]
+    mov  [rel display_len], rax
+
+    ; mostrar resultados directamente (sin generar HTML ni log)
+    mov  rdi, [rel p_freq_table]
+    mov  rsi, [rel display_len]
+    call display_histogram
+
+    mov  rdi, [rel entropy_before_milli]
+    mov  rsi, [rel entropy_after_milli]
+    call display_entropy_panel
+
+    lea  rdi, [rel msg_analysis_done]
+    call io_print_string
+
+    jmp  .cleanup
+
+; =============================================================================
 ; VISUALIZACIÓN — histograma y panel de entropía
 ; =============================================================================
 .display:
@@ -473,13 +529,148 @@ _start:
     call io_free
 .skip_free:
 
-    pop  r15                    ; restaurar callee-saved (ABI, orden inverso al push)
+    ; en modo menú: resetear estado y volver al bucle en lugar de salir
+    cmp  byte [rel menu_active], 1
+    jne  .cli_exit
+
+    mov  qword [rel fd_in], -1
+    mov  qword [rel fd_out], -1
+    mov  qword [rel buf_ptr], 0
+    mov  qword [rel file_size], 0
+    mov  byte [rel exit_code], 0
+    jmp  .menu_loop
+
+.cli_exit:
+    pop  r15
     pop  r14
     pop  r13
     pop  r12
     pop  rbx
-    movzx rdi, byte [rel exit_code]  ; código de salida: 0 o 1
+    movzx rdi, byte [rel exit_code]
     call  sys_exit
+
+; =============================================================================
+; MODO MENÚ INTERACTIVO
+; =============================================================================
+
+.menu_start:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov  byte [rel menu_active], 1
+
+.menu_loop:
+    call menu_display_main
+    call menu_read_choice        ; rax = 0-4
+
+    test rax, rax
+    jz   .menu_final_exit
+    cmp  rax, 1
+    je   .menu_do_encrypt
+    cmp  rax, 2
+    je   .menu_do_decrypt
+    cmp  rax, 3
+    je   .menu_do_analyze
+    cmp  rax, 4
+    je   .menu_do_info
+    jmp  .menu_loop
+
+.menu_final_exit:
+    pop  r15
+    pop  r14
+    pop  r13
+    pop  r12
+    pop  rbx
+    EXIT 0
+
+.menu_do_encrypt:
+    lea  rdi, [rel menu_prompt_input]
+    call io_print_string
+    lea  rdi, [rel menu_buf_in]
+    mov  rsi, 256
+    call io_read_line
+    test rax, rax
+    jz   .menu_loop
+
+    lea  rdi, [rel menu_prompt_output]
+    call io_print_string
+    lea  rdi, [rel menu_buf_out]
+    mov  rsi, 256
+    call io_read_line
+    test rax, rax
+    jz   .menu_loop
+
+    lea  rdi, [rel menu_prompt_pass]
+    call io_print_string
+    lea  rdi, [rel menu_buf_pass]
+    mov  rsi, 128
+    call menu_get_password
+
+    mov  byte [rel mode], 0
+    lea  r13, [rel menu_buf_in]
+    lea  r14, [rel menu_buf_out]
+    lea  r15, [rel menu_buf_pass]
+    mov  [rel input_fname_ptr], r13
+    mov  qword [rel fd_in], -1
+    mov  qword [rel fd_out], -1
+    mov  qword [rel buf_ptr], 0
+    jmp  .mode_ok
+
+.menu_do_decrypt:
+    lea  rdi, [rel menu_prompt_input]
+    call io_print_string
+    lea  rdi, [rel menu_buf_in]
+    mov  rsi, 256
+    call io_read_line
+    test rax, rax
+    jz   .menu_loop
+
+    lea  rdi, [rel menu_prompt_output]
+    call io_print_string
+    lea  rdi, [rel menu_buf_out]
+    mov  rsi, 256
+    call io_read_line
+    test rax, rax
+    jz   .menu_loop
+
+    lea  rdi, [rel menu_prompt_pass]
+    call io_print_string
+    lea  rdi, [rel menu_buf_pass]
+    mov  rsi, 128
+    call menu_get_password
+
+    mov  byte [rel mode], 1
+    lea  r13, [rel menu_buf_in]
+    lea  r14, [rel menu_buf_out]
+    lea  r15, [rel menu_buf_pass]
+    mov  [rel input_fname_ptr], r13
+    mov  qword [rel fd_in], -1
+    mov  qword [rel fd_out], -1
+    mov  qword [rel buf_ptr], 0
+    jmp  .mode_ok
+
+.menu_do_analyze:
+    lea  rdi, [rel menu_prompt_input]
+    call io_print_string
+    lea  rdi, [rel menu_buf_in]
+    mov  rsi, 256
+    call io_read_line
+    test rax, rax
+    jz   .menu_loop
+
+    mov  byte [rel mode], 2
+    lea  r13, [rel menu_buf_in]
+    mov  [rel input_fname_ptr], r13
+    mov  qword [rel fd_in], -1
+    mov  qword [rel fd_out], -1
+    mov  qword [rel buf_ptr], 0
+    jmp  .mode_ok
+
+.menu_do_info:
+    call menu_display_info
+    jmp  .menu_loop
 
 ; =============================================================================
 ; HELPERS LOCALES

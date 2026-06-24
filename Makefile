@@ -2,7 +2,7 @@ NASM := nasm
 LD := ld
 
 TARGET := cifrador
-ASM := main.asm io.asm cipher.asm transpose.asm entropy.asm header.asm display.asm report.asm log.asm
+ASM := main.asm io.asm cipher.asm transpose.asm entropy.asm header.asm display.asm report.asm log.asm menu.asm
 OBJ := $(ASM:.asm=.o)
 
 NASMFLAGS := -f elf64 -Iinclude/

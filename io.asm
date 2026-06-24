@@ -88,6 +88,9 @@ global io_alloc
 global io_free
 
 global io_close_and_exit
+global io_read_line
+global io_set_no_echo
+global io_set_echo
 
 ; =============================================================================
 section .data
@@ -105,6 +108,8 @@ section .bss
 ; También usado por io_print_hex64: "0x" + 16 nibbles = 18 bytes.
 ; 24 bytes cubre ambos usos sin solapamiento.
 io_num_buf  resb 24
+term_saved  resb 60    ; copia original de struct termios (36 bytes + margen)
+term_work   resb 60    ; copia de trabajo para modificar
 
 ; =============================================================================
 section .text
@@ -673,4 +678,132 @@ io_file_write_buf:
     pop  r13
     pop  r12
     pop  rbx
+    ret
+
+; =============================================================================
+; BLOQUE 4 — E/S INTERACTIVA
+; =============================================================================
+
+; ─── io_read_line ─────────────────────────────────────────────────────────────
+; uint64_t io_read_line(char *buf, uint64_t max_len)
+;   rdi = buffer destino
+;   rsi = capacidad máxima (incluyendo null)
+;   rax = bytes leídos (sin '\n', sin null)
+;
+; Lee desde stdin byte a byte hasta '\n', '\r' o max_len-1.
+; Siempre null-termina el buffer.
+;
+; TABLA DE REGISTROS:
+;   rbx = buffer base
+;   r12 = max_len - 1  (límite efectivo)
+;   r13 = bytes leídos
+io_read_line:
+    push rbx
+    push r12
+    push r13
+
+    mov  rbx, rdi
+    mov  r12, rsi
+    xor  r13, r13
+
+    test r12, r12
+    jz   .rl_done
+    dec  r12                     ; dejar espacio para null terminator
+    jz   .rl_done
+
+.rl_loop:
+    cmp  r13, r12
+    jge  .rl_done
+
+    xor  rdi, rdi                ; fd = 0 (stdin)
+    lea  rsi, [rbx + r13]        ; buf[r13]
+    mov  rdx, 1                  ; count = 1
+    mov  rax, SYS_READ
+    syscall
+
+    test rax, rax
+    jle  .rl_done                ; EOF o error
+
+    movzx rax, byte [rbx + r13]
+    cmp  al, 10                  ; '\n'
+    je   .rl_done
+    cmp  al, 13                  ; '\r'
+    je   .rl_done
+
+    inc  r13
+    jmp  .rl_loop
+
+.rl_done:
+    mov  byte [rbx + r13], 0    ; null-terminar
+    mov  rax, r13
+
+    pop  r13
+    pop  r12
+    pop  rbx
+    ret
+
+; ─── io_set_no_echo ───────────────────────────────────────────────────────────
+; void io_set_no_echo(void)
+;
+; Guarda la configuración actual del terminal y desactiva el eco de caracteres.
+; Llamar io_set_echo() para restaurar.
+;
+; Usa ioctl(0, TCGETS, &term_saved) → modifica c_lflag → ioctl(0, TCSETS, &work).
+; c_lflag está en offset 12 del struct termios (Linux x86-64).
+io_set_no_echo:
+    ; guardar termios original
+    xor  rdi, rdi
+    mov  rsi, TCGETS
+    lea  rdx, [rel term_saved]
+    mov  rax, SYS_IOCTL
+    syscall
+    test rax, rax
+    js   .ne_done               ; falla silenciosamente (p.ej. stdin no es terminal)
+
+    ; copiar saved → work (36 bytes = 4 qwords + 1 dword)
+    lea  rsi, [rel term_saved]
+    lea  rdi, [rel term_work]
+    mov  rax, [rsi]
+    mov  [rdi], rax
+    mov  rax, [rsi + 8]
+    mov  [rdi + 8], rax
+    mov  rax, [rsi + 16]
+    mov  [rdi + 16], rax
+    mov  rax, [rsi + 24]
+    mov  [rdi + 24], rax
+    mov  eax, [rsi + 32]
+    mov  [rdi + 32], eax
+
+    ; limpiar bit ECHO en c_lflag (offset 12)
+    lea  rax, [rel term_work]
+    and  dword [rax + LFLAG_OFF], ~ECHO_BIT
+
+    ; aplicar
+    xor  rdi, rdi
+    mov  rsi, TCSETS
+    lea  rdx, [rel term_work]
+    mov  rax, SYS_IOCTL
+    syscall
+
+.ne_done:
+    ret
+
+; ─── io_set_echo ──────────────────────────────────────────────────────────────
+; void io_set_echo(void)
+;
+; Restaura la configuración de terminal guardada por io_set_no_echo().
+; También imprime '\n' en stdout para compensar el Enter que no se mostró.
+io_set_echo:
+    xor  rdi, rdi
+    mov  rsi, TCSETS
+    lea  rdx, [rel term_saved]
+    mov  rax, SYS_IOCTL
+    syscall
+
+    ; imprimir newline para compensar el Enter silenciado
+    mov  rdi, STDOUT
+    lea  rsi, [rel io_newline]
+    mov  rdx, 1
+    mov  rax, SYS_WRITE
+    syscall
     ret
