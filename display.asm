@@ -248,17 +248,10 @@ display_histogram:
     mov  rbp, rax               ; rbp = bar_len (callee-saved: sobrevive calls)
 
     ; ── llenar bar_buf con '#' × bar_len ─────────────────────────────────────
-    lea  rax, [rel bar_buf]     ; rax = &bar_buf
-    xor  r8,  r8                ; r8  = índice de escritura
-    mov  rcx, rbp               ; rcx = bar_len (caller-saved; no hay calls aquí)
-.dh_fill_hash:
-    test rcx, rcx
-    jz   .dh_fill_hash_done
-    mov  byte [rax + r8], '#'
-    inc  r8
-    dec  rcx
-    jmp  .dh_fill_hash
-.dh_fill_hash_done:
+    lea  rdi, [rel bar_buf]
+    mov  al,  '#'
+    mov  rcx, rbp
+    rep  stosb
 
     ; ── imprimir: cyan + barra + reset ───────────────────────────────────────
     lea  rdi, [rel ansi_cyan]
@@ -272,26 +265,16 @@ display_histogram:
     call io_print_string        ; restaurar color
 
     ; ── relleno de espacios hasta BAR_MAX ────────────────────────────────────
-    mov  rax, BAR_MAX
-    sub  rax, rbp               ; rax = espacios de relleno
-    test rax, rax
+    mov  rcx, BAR_MAX
+    sub  rcx, rbp               ; rcx = pad count (BAR_MAX - bar_len)
     jz   .dh_no_pad
 
-    lea  rdx, [rel bar_buf]     ; reutilizar bar_buf para espacios
-    xor  r8,  r8
-.dh_fill_sp:
-    test rax, rax
-    jz   .dh_fill_sp_done
-    mov  byte [rdx + r8], ' '
-    inc  r8
-    dec  rax
-    jmp  .dh_fill_sp
-.dh_fill_sp_done:
-    ; recalcular count de espacios para io_print_len
-    mov  rax, BAR_MAX
-    sub  rax, rbp
     lea  rdi, [rel bar_buf]
-    mov  rsi, rax
+    mov  al,  ' '
+    push rcx                    ; guardar count (rep stosb lo pone a cero)
+    rep  stosb
+    lea  rdi, [rel bar_buf]
+    pop  rsi                    ; rsi = pad count
     call io_print_len
 
 .dh_no_pad:
