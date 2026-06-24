@@ -125,6 +125,12 @@ cipher_build_key64:
     jmp  .bk_loop
 
 .bk_done:
+    ; clave nula → XOR con 0 no cifra nada; usar fallback no-nulo
+    test r12, r12
+    jnz  .bk_store
+    mov  r12, 0x0101010101010101
+
+.bk_store:
     ; guardar clave de 64 bits en variable global key64
     lea  rax, [rel key64]
     mov  [rax], r12
