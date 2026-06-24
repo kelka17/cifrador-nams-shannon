@@ -193,13 +193,9 @@ section .text
 ;   rcx = contador descendente (256..1)
 frequency_clear:
     lea  rdi, [rel frequency_table] ; rdi = &frequency_table[0]
-    mov  rcx, 256               ; 256 entradas × 8 bytes = 2048 bytes
     xor  rax, rax               ; valor de relleno = 0
-.fc_loop:
-    mov  qword [rdi], 0         ; limpiar una entrada de 64 bits
-    add  rdi, 8                 ; avanzar al siguiente qword
-    dec  rcx
-    jnz  .fc_loop               ; repetir hasta rcx == 0
+    mov  rcx, 256               ; 256 qwords = 2048 bytes
+    rep  stosq                  ; memset(frequency_table, 0, 2048)
     ret
 
 ; =============================================================================
@@ -239,13 +235,13 @@ frequency_count:
     mov  rbx, rdi               ; rbx = buffer base
     mov  r12, rsi               ; r12 = length
     xor  rcx, rcx               ; rcx = índice (0..length-1)
+    lea  rdx, [rel frequency_table] ; rdx = base tabla (constante en el bucle)
 
 .fct_loop:
     cmp  rcx, r12               ; ¿llegamos al final?
     je   .fct_end
 
     movzx rax, byte [rbx + rcx] ; rax = buffer[rcx] (zero-extended a 64 bits)
-    lea   rdx, [rel frequency_table]
     inc   qword [rdx + rax*8]   ; frequency_table[byte]++
 
     inc  rcx
@@ -329,7 +325,7 @@ entropy_calculate:
     ; ── secuencia FPU para −pᵢ·log₂(pᵢ) ─────────────────────────────────────
     fild qword [rsp + 8]        ; ST0=freq[i],  ST1=H_acc
     fild qword [rsp]            ; ST0=total,    ST1=freq[i], ST2=H_acc
-    fdiv                        ; FDIVP ST(1),ST(0): ST0=freq/total=pᵢ, ST1=H_acc
+    fdivp st1, st0              ; ST0=freq/total=pᵢ, ST1=H_acc
     fld  st0                    ; duplicar pᵢ: ST0=pᵢ, ST1=pᵢ, ST2=H_acc
     fyl2x                       ; ST0=pᵢ·log₂(pᵢ), ST1=H_acc  [FYL2X: ST0=ST1·log₂(ST0)]
     fchs                        ; ST0=−pᵢ·log₂(pᵢ) (término positivo de entropía)

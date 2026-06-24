@@ -54,6 +54,7 @@ extern transpose_encrypt, transpose_decrypt
 extern frequency_clear, frequency_count, entropy_calculate, frequency_table
 extern header_build, header_validate, header_checksum
 extern display_histogram, display_entropy_panel
+extern report_generate
 
 ; =============================================================================
 section .rodata
@@ -84,6 +85,8 @@ section .rodata
     msg_encrypting db "  Cifrando...", 10, 0
     msg_decrypting db "  Descifrando...", 10, 0
     msg_done       db "  Listo.", 10, 0
+    report_fname   db "reporte.html", 0
+    msg_report     db "  Reporte HTML: reporte.html", 10, 0
 
 ; =============================================================================
 section .data
@@ -106,6 +109,9 @@ section .bss
     display_len          resq 1  ; longitud para el histograma (sin cabecera en decrypt)
     entropy_before_milli resq 1  ; H_antes  × 1000
     entropy_after_milli  resq 1  ; H_después × 1000
+    fd_report            resq 1  ; descriptor del archivo HTML de reporte
+    input_fname_ptr      resq 1  ; puntero al nombre del archivo de entrada
+    exit_code            resb 1  ; 0=éxito, 1=error (BSS default=0)
 
 ; =============================================================================
 section .text
@@ -150,6 +156,11 @@ _start:
     mov  r13, rdx               ; r13 = argv[2] (archivo entrada)
     mov  r14, r8                ; r14 = argv[3] (archivo salida)
     mov  r15, r9                ; r15 = argv[4] (clave)
+    mov  [rel input_fname_ptr], rdx  ; guardar ptr al nombre de entrada para el reporte
+
+    ; inicializar fds a -1 (sentinel: BSS 0 es ambiguo con fd stdin)
+    mov  qword [rel fd_in],  -1
+    mov  qword [rel fd_out], -1
 
     ; ── parsear modo ──────────────────────────────────────────────────────────
     lea  rdi, [rel str_encrypt]
@@ -285,16 +296,17 @@ _start:
     lea  rdi, [rel msg_decrypting]
     call io_print_string
 
+    ; ── verificar tamaño mínimo ANTES de leer la cabecera ───────────────────
+    ; (header_validate hace un dword read; necesitamos ≥ 4 bytes para eso)
+    mov  rax, [rel file_size]
+    cmp  rax, 21                ; < 21 → sin cabecera completa (jb = unsigned)
+    jb   .err_small
+
     ; ── validar cabecera CRYP ────────────────────────────────────────────────
     mov  rdi, [rel buf_ptr]
     call header_validate        ; rax = 1 si magic == 0x43525950 ("CRYP")
     test rax, rax
     jz   .err_magic
-
-    ; ── verificar que el archivo tenga cabecera + al menos 1 byte ───────────
-    mov  rax, [rel file_size]
-    cmp  rax, 21                ; < 21 → demasiado pequeño
-    jl   .err_small
 
     ; ── calcular puntero y longitud del contenido cifrado ────────────────────
     ; Reasignar r12/r13 (los valores argv[1]/argv[2] ya no son necesarios)
@@ -353,6 +365,27 @@ _start:
     lea  rdi, [rel msg_done]
     call io_print_string
 
+    ; ── generar reporte HTML ──────────────────────────────────────────────────
+    lea  rdi, [rel report_fname]
+    call io_file_open_write    ; rax = fd o negativo si falla
+    test rax, rax
+    js   .skip_report          ; si no se puede crear, omitir silenciosamente
+    mov  [rel fd_report], rax
+
+    mov  rdi, [rel fd_report]
+    mov  rsi, [rel input_fname_ptr]
+    mov  rdx, [rel display_len]   ; tamaño correcto en ambos modos (sin cabecera en decrypt)
+    mov  rcx, [rel entropy_before_milli]
+    mov  r8,  [rel entropy_after_milli]
+    call report_generate
+
+    mov  rdi, [rel fd_report]
+    call io_file_close
+
+    lea  rdi, [rel msg_report]
+    call io_print_string
+
+.skip_report:
     jmp  .cleanup
 
 ; =============================================================================
@@ -399,18 +432,22 @@ _start:
     jmp  .exit_err
 
 ; =============================================================================
-; LIMPIEZA Y SALIDA
+; LIMPIEZA Y SALIDA (único punto de salida — usa exit_code para 0 o 1)
 ; =============================================================================
+.exit_err:
+    mov  byte [rel exit_code], 1  ; marcar salida con error
+
 .cleanup:
-    ; cerrar descriptores de archivo
+    ; cerrar fd_in (sentinel -1 significa "no abierto")
     mov  rdi, [rel fd_in]
-    test rdi, rdi
-    jle  .skip_close_in
+    cmp  rdi, -1
+    je   .skip_close_in
     call io_file_close
 .skip_close_in:
+    ; cerrar fd_out
     mov  rdi, [rel fd_out]
-    test rdi, rdi
-    jle  .skip_close_out
+    cmp  rdi, -1
+    je   .skip_close_out
     call io_file_close
 .skip_close_out:
 
@@ -427,15 +464,8 @@ _start:
     pop  r13
     pop  r12
     pop  rbx
-    EXIT 0                      ; syscall sys_exit(0)
-
-.exit_err:
-    pop  r15
-    pop  r14
-    pop  r13
-    pop  r12
-    pop  rbx
-    EXIT 1                      ; syscall sys_exit(1)
+    movzx rdi, byte [rel exit_code]  ; código de salida: 0 o 1
+    call  sys_exit
 
 ; =============================================================================
 ; HELPERS LOCALES
