@@ -55,6 +55,7 @@ extern frequency_clear, frequency_count, entropy_calculate, frequency_table
 extern header_build, header_validate, header_checksum
 extern display_histogram, display_entropy_panel
 extern report_generate
+extern log_append
 
 ; =============================================================================
 section .rodata
@@ -386,6 +387,21 @@ _start:
     call io_print_string
 
 .skip_report:
+    ; registrar la operación en cifrador.log (siempre, incluso si el reporte falló)
+    movzx rax, byte [rel mode]
+    test  rax, rax
+    jnz   .log_decrypt_mode
+    lea   rdi, [rel str_encrypt]
+    jmp   .log_call
+.log_decrypt_mode:
+    lea   rdi, [rel str_decrypt]
+.log_call:
+    mov   rsi, [rel input_fname_ptr]
+    mov   rdx, [rel display_len]
+    mov   rcx, [rel entropy_before_milli]
+    mov   r8,  [rel entropy_after_milli]
+    call  log_append
+
     jmp  .cleanup
 
 ; =============================================================================
